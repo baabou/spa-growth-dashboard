@@ -78,7 +78,7 @@ function Sparkline({data,color}){
 }
 
 // ─── Line Chart with Y-axis scale — pixel-accurate ───────────────────────────
-function LineChart({history,color,height=160}){
+function LineChart({history,color,height=200}){
   const [hov,setHov]=useState(null);
   const [W,setW]=useState(500);
   const containerRef=useRef(null);
@@ -93,7 +93,9 @@ function LineChart({history,color,height=160}){
 
   const vals=history.map(h=>h.value);
   const dataMax=Math.max(...vals,1);
-  const dataMin=Math.min(...vals);
+  const rawMin=Math.min(...vals);
+  // Option C: keep 0 as baseline, proportional scale
+  const dataMin=0;
   const range=dataMax-dataMin||1;
 
   const PADL=46,PADR=12,PADT=12,PADB=8;
@@ -183,7 +185,7 @@ function LineChart({history,color,height=160}){
 }
 
 // ─── Global Chart — pixel-accurate ───────────────────────────────────────────
-function GlobalChart({history}){
+function GlobalChart({history,color="#3B82F6"}){
   const [hov,setHov]=useState(null);
   const [W,setW]=useState(800);
   const containerRef=useRef(null);
@@ -198,9 +200,11 @@ function GlobalChart({history}){
 
   const vals=history.map(h=>h.value);
   const dataMax=Math.max(...vals,1);
-  const dataMin=Math.min(...vals);
+  const rawMin=Math.min(...vals);
+  // Option C: keep 0 as baseline
+  const dataMin=0;
   const range=dataMax-dataMin||1;
-  const H=160;
+  const H=220;
   const PADL=56,PADR=16,PADT=16,PADB=20;
   const chartW=W-PADL-PADR;
   const chartH=H-PADT-PADB;
@@ -240,8 +244,8 @@ function GlobalChart({history}){
         onMouseLeave={()=>setHov(null)}>
         <defs>
           <linearGradient id="gGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.2"/>
-            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0"/>
+            <stop offset="0%" stopColor={color} stopOpacity="0.2"/>
+            <stop offset="100%" stopColor={color} stopOpacity="0"/>
           </linearGradient>
           <clipPath id="gClip"><rect x={PADL} y={0} width={chartW} height={H}/></clipPath>
         </defs>
@@ -253,19 +257,19 @@ function GlobalChart({history}){
         ))}
         <line x1={PADL} y1={PADT} x2={PADL} y2={H-PADB} stroke="#E2E8F0" strokeWidth={1}/>
         <polygon points={area} fill="url(#gGrad)" clipPath="url(#gClip)"/>
-        <polyline points={pts} fill="none" stroke="#3B82F6" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
+        <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
         {history.map((h,i)=>(
           <g key={i} onMouseEnter={()=>setHov(i)} style={{cursor:"pointer"}}>
             <rect x={toX(i)-chartW/history.length/2} y={0} width={chartW/history.length} height={H} fill="transparent"/>
             <circle cx={toX(i)} cy={toY(h.value)} r={hov===i?5:3}
-              fill={hov===i?"#3B82F6":"#fff"} stroke="#3B82F6" strokeWidth={2} style={{transition:"r 0.1s"}}/>
+              fill={hov===i?color:"#fff"} stroke={color} strokeWidth={2} style={{transition:"r 0.1s"}}/>
           </g>
         ))}
         {history.map((h,i)=>{
           const show=i===0||i===history.length-1||history.length<=8||i%Math.ceil(history.length/6)===0;
           return show?(
             <text key={i} x={toX(i)} y={H} textAnchor="middle" fontSize={11}
-              fill={hov===i?"#3B82F6":"#94A3B8"} fontWeight={hov===i?700:400}>
+              fill={hov===i?color:"#94A3B8"} fontWeight={hov===i?700:400}>
               {fmtMonth(h.month).split(" ")[0]}
             </text>
           ):null;
@@ -276,12 +280,40 @@ function GlobalChart({history}){
 }
 
 // ─── Doctor Modal (centered overlay) ─────────────────────────────────────────
-function DoctorModal({doctor,onClose,dateRange,months}){
+function DoctorModal({doctor,onClose,dateRange,months,allRows}){
   if(!doctor)return null;
   const {label,csvNames,lastVal,firstVal,delta,pct,avgMonthly,breakdown,history}=doctor;
   const isUp=delta>0||doctor.isNewEntry,isDown=delta<0;
   const color=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
   const accentBg=isUp?"#ECFDF5":isDown?"#FEF2F2":"#F8FAFC";
+
+  const [activeTreat,setActiveTreat]=useState(null);
+
+  // Build per-treatment filtered history when a treatment is selected
+  const chartHistory=useMemo(()=>{
+    if(!activeTreat)return history;
+    const selMonths=history.map(h=>h.month);
+    const monthMap={};
+    (allRows||[]).filter(r=>csvNames.includes(r.doctor)&&r.treat===activeTreat&&selMonths.includes(r.date))
+      .forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
+    return selMonths.map(m=>({month:m,value:monthMap[m]||0}));
+  },[activeTreat,history,allRows,csvNames]);
+
+  // Compute stats for the active treatment filter (or global if none)
+  const filteredVals=useMemo(()=>{
+    if(!activeTreat||!chartHistory||chartHistory.length===0)return{lastVal,firstVal,delta,pct,avgMonthly};
+    const fLastVal=chartHistory[chartHistory.length-1]?.value??0;
+    const fFirstVal=chartHistory[0]?.value??0;
+    const fDelta=fLastVal-fFirstVal;
+    const fPct=fFirstVal>0?fDelta/fFirstVal*100:null;
+    const histVals=chartHistory.map(h=>h.value);
+    const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
+    const fAvg=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
+    return{lastVal:fLastVal,firstVal:fFirstVal,delta:fDelta,pct:fPct,avgMonthly:fAvg};
+  },[activeTreat,chartHistory,lastVal,firstVal,delta,pct,avgMonthly]);
+
+  const treatColor=activeTreat?T_COLORS[activeTreat]||"#3B82F6":color;
+  const dispColor=activeTreat?treatColor:(isUp?"#10B981":isDown?"#EF4444":"#94A3B8");
 
   // close on Escape
   useEffect(()=>{
@@ -355,10 +387,10 @@ function DoctorModal({doctor,onClose,dateRange,months}){
           {/* 4 stat tiles */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:24}}>
             {[
-              {label:"Start",value:fmt(firstVal),sub:fmtMonth(months[dateRange[0]]),c:"#0F172A"},
-              {label:"Last",value:fmt(lastVal),sub:fmtMonth(months[Math.min(dateRange[1],months.length-1)]),c:"#0F172A"},
-              {label:"Period Δ",value:(delta>0?"+":"")+delta,sub:pct!==null?`${pct>0?"+":""}${pct.toFixed(1)}%`:"—",c:color},
-              {label:"Avg / month",value:(avgMonthly>0?"+":"")+avgMonthly.toFixed(1),sub:"monthly average",c:avgMonthly>0?"#10B981":avgMonthly<0?"#EF4444":"#94A3B8"},
+              {label:"Start",value:fmt(filteredVals.firstVal),sub:fmtMonth(months[dateRange[0]]),c:"#0F172A"},
+              {label:"Last",value:fmt(filteredVals.lastVal),sub:fmtMonth(months[Math.min(dateRange[1],months.length-1)]),c:"#0F172A"},
+              {label:"Period Δ",value:(filteredVals.delta>0?"+":"")+filteredVals.delta,sub:filteredVals.pct!==null?`${filteredVals.pct>0?"+":""}${filteredVals.pct.toFixed(1)}%`:"—",c:dispColor},
+              {label:"Avg / month",value:(filteredVals.avgMonthly>0?"+":"")+filteredVals.avgMonthly.toFixed(1),sub:"monthly average",c:filteredVals.avgMonthly>0?"#10B981":filteredVals.avgMonthly<0?"#EF4444":"#94A3B8"},
             ].map(s=>(
               <div key={s.label} style={{
                 padding:"14px 16px",borderRadius:14,
@@ -373,23 +405,30 @@ function DoctorModal({doctor,onClose,dateRange,months}){
             ))}
           </div>
 
-          {/* Treatment breakdown */}
+          {/* Treatment breakdown — clickable to filter chart */}
           <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:12}}>
             Treatment breakdown — {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}
+            {activeTreat&&<span onClick={()=>setActiveTreat(null)} style={{marginLeft:8,cursor:"pointer",color:"#3B82F6",fontWeight:700,fontSize:10}}>✕ Clear</span>}
           </div>
           {Object.keys(breakdown).length===0?(
             <div style={{fontSize:12,color:"#CBD5E1"}}>No activity for this period</div>
           ):(
             Object.entries(breakdown).sort((a,b)=>b[1]-a[1]).map(([t,v])=>{
               const maxB=Math.max(...Object.values(breakdown),1);
+              const isActive=activeTreat===t;
               return(
-                <div key={t} style={{marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8"}}>{t}</span>
+                <div key={t} style={{marginBottom:10,cursor:"pointer",opacity:activeTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
+                  onClick={()=>setActiveTreat(prev=>prev===t?null:t)}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,alignItems:"center"}}>
+                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8",display:"flex",alignItems:"center",gap:6}}>
+                      {isActive&&<span style={{fontSize:9,background:T_COLORS[t]||"#3B82F6",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>ACTIVE</span>}
+                      {t}
+                    </span>
                     <span style={{fontSize:12,fontWeight:700,color:"#334155"}}>{v}</span>
                   </div>
                   <div style={{height:7,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
-                    <div style={{width:`${(v/maxB)*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,transition:"width 0.5s"}}/>
+                    <div style={{width:`${(v/maxB)*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,transition:"width 0.5s",
+                      boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:""}}/>
                   </div>
                 </div>
               );
@@ -400,9 +439,9 @@ function DoctorModal({doctor,onClose,dateRange,months}){
         {/* ── RIGHT COLUMN — chart ── */}
         <div style={{padding:"32px 32px 32px 28px",display:"flex",flexDirection:"column",justifyContent:"center",gap:16}}>
           <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em"}}>
-            MUSP over period — hover for details
+            {activeTreat?`${activeTreat} — MUSP over period`:"MUSP over period"} — hover for details
           </div>
-          <LineChart history={history} color={color} height={200}/>
+          <LineChart history={chartHistory} color={treatColor} height={240}/>
           {/* Period label */}
           <div style={{padding:"10px 16px",background:"#F8FAFC",borderRadius:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <span style={{fontSize:11,color:"#94A3B8"}}>Period</span>
@@ -445,9 +484,10 @@ export default function Dashboard(){
   const [treatment,setTreat]=useState("All");
   const [dateRange,setRange]=useState([0,1]);
   const [sortBy,setSortBy]=useState("delta");
-  const [activeTab,setActiveTab]=useState("doctors");
+  const [activeTab,setActiveTab]=useState("overview");
   const [filterMode,setFilter]=useState("all");
   const [activeDoctor,setActiveDoctor]=useState(null);
+  const [overviewTreat,setOverviewTreat]=useState(null);
 
   const [csvError,setCsvError]=useState(null);
 
@@ -500,58 +540,71 @@ export default function Dashboard(){
     if(f?.name.endsWith(".csv"))handleFile(f);
   },[handleFile]);
 
-  const{months,stats,treatSummary,totals,globalHistory}=useMemo(()=>{
-    if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[]};
+  const{months,stats,treatSummary,totals,globalHistory,filteredStats,filteredTotals,filteredGlobalHistory,allRows}=useMemo(()=>{
+    if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:[]};
     const rows=rawData.map(r=>{const k=Object.keys(r);return{doctor:(r[k[5]]||"").trim(),date:(r[k[6]]||"").substring(0,7),treat:(r[k[7]]||"").trim(),musp:parseInt(r[k[8]])||0};}).filter(r=>r.date&&r.doctor);
     const allMonths=[...new Set(rows.map(r=>r.date))].sort();
-    if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[]};
+    if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:rows};
     const si=Math.min(dateRange[0],allMonths.length-1);
     const ei=Math.min(Math.max(dateRange[1],si+1),allMonths.length-1);
     const selMonths=allMonths.slice(si,ei+1);
     const firstM=allMonths[si],lastM=allMonths[ei];
-    const tRows=treatment==="All"?rows:rows.filter(r=>r.treat===treatment);
     const allCsvNames=new Set(SPA_MEMBERS.flatMap(m=>m.csvNames));
 
-    const stats=SPA_MEMBERS.map(member=>{
-      const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
-      const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
-      const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
-      const delta=lastVal-firstVal;
-      // pct: if firstVal=0 but lastVal>0, that's pure new growth (+∞), show as null but mark as up
-      const pct=firstVal>0?(lastVal-firstVal)/firstVal*100:null;
-      // isNewEntry: started at 0, now has data — treat as growing
-      const isNewEntry=firstVal===0&&lastVal>0;
-      const histVals=selMonths.map(m=>monthMap[m]||0);
-      const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
-      const avgMonthly=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
-      const breakdown={};myRows.filter(r=>r.date===lastM).forEach(r=>{breakdown[r.treat]=(breakdown[r.treat]||0)+r.musp;});
-      const history=selMonths.map(m=>({month:m,value:monthMap[m]||0}));
-      return{...member,lastVal,firstVal,delta,pct,isNewEntry,avgMonthly,breakdown,history};
-    });
+    // Helper: build stats for a given row filter
+    const buildStats=(rowFilter)=>{
+      const tRows=rowFilter?rows.filter(rowFilter):rows;
+      const memberStats=SPA_MEMBERS.map(member=>{
+        const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
+        const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
+        const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
+        const delta=lastVal-firstVal;
+        const pct=firstVal>0?(lastVal-firstVal)/firstVal*100:null;
+        const isNewEntry=firstVal===0&&lastVal>0;
+        const histVals=selMonths.map(m=>monthMap[m]||0);
+        const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
+        const avgMonthly=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
+        const breakdown={};myRows.filter(r=>r.date===lastM).forEach(r=>{breakdown[r.treat]=(breakdown[r.treat]||0)+r.musp;});
+        const history=selMonths.map(m=>({month:m,value:monthMap[m]||0}));
+        return{...member,lastVal,firstVal,delta,pct,isNewEntry,avgMonthly,breakdown,history};
+      });
+      const sorted=[...memberStats].sort((a,b)=>{
+        if(sortBy==="delta")return(b.delta??-Infinity)-(a.delta??-Infinity);
+        if(sortBy==="volume")return b.lastVal-a.lastVal;
+        return 0;
+      });
+      const globalMap={};
+      tRows.filter(r=>allCsvNames.has(r.doctor)).forEach(r=>{globalMap[r.date]=(globalMap[r.date]||0)+r.musp;});
+      const gHistory=selMonths.map(m=>({month:m,value:globalMap[m]||0}));
+      const totalFirst=sorted.reduce((s,d)=>s+d.firstVal,0);
+      const totalLast=sorted.reduce((s,d)=>s+d.lastVal,0);
+      const totalDelta=totalLast-totalFirst;
+      const totalPct=totalFirst>0?totalDelta/totalFirst*100:null;
+      const tots={totalMUSP:totalLast,totalFirst,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0||d.isNewEntry).length,declining:sorted.filter(d=>d.delta<0).length};
+      return{sorted,gHistory,tots};
+    };
 
-    const sorted=[...stats].sort((a,b)=>{
-      if(sortBy==="delta")return(b.delta??-Infinity)-(a.delta??-Infinity);
-      if(sortBy==="volume")return b.lastVal-a.lastVal;
-      if(sortBy==="name")return a.label.localeCompare(b.label);
-      return 0;
-    });
+    // Base filter: global treatment pill filter
+    const baseFilter=treatment==="All"?null:r=>r.treat===treatment;
 
-    const globalMap={};
-    tRows.filter(r=>allCsvNames.has(r.doctor)).forEach(r=>{globalMap[r.date]=(globalMap[r.date]||0)+r.musp;});
-    const globalHistory=selMonths.map(m=>({month:m,value:globalMap[m]||0}));
+    // Stats for the doctors tab (uses global treatment filter)
+    const{sorted:stats,gHistory:globalHistory,tots:totals}=buildStats(baseFilter);
 
+    // Stats filtered by overviewTreat (for overview tab KPIs)
+    const overviewFilter=overviewTreat
+      ? (treatment==="All"?r=>r.treat===overviewTreat:r=>r.treat===treatment&&r.treat===overviewTreat)
+      : baseFilter;
+    const{sorted:filteredStats,gHistory:filteredGlobalHistory,tots:filteredTotals}=buildStats(overviewFilter);
+
+    // Treatment summary (always based on base filter)
     const treatMap={};
-    tRows.filter(r=>selMonths.includes(r.date)&&allCsvNames.has(r.doctor)).forEach(r=>{treatMap[r.treat]=(treatMap[r.treat]||0)+r.musp;});
+    (baseFilter?rows.filter(baseFilter):rows).filter(r=>selMonths.includes(r.date)&&allCsvNames.has(r.doctor))
+      .forEach(r=>{treatMap[r.treat]=(treatMap[r.treat]||0)+r.musp;});
     const tTotal=Object.values(treatMap).reduce((s,v)=>s+v,0);
     const treatSummary=Object.entries(treatMap).map(([t,v])=>({t,v,pct:tTotal>0?v/tTotal:0})).sort((a,b)=>b.v-a.v);
 
-    const totalFirst=sorted.reduce((s,d)=>s+d.firstVal,0);
-    const totalLast=sorted.reduce((s,d)=>s+d.lastVal,0);
-    const totalDelta=totalLast-totalFirst;
-    const totalPct=totalFirst>0?totalDelta/totalFirst*100:null;
-
-    return{months:allMonths,stats:sorted,treatSummary,globalHistory,totals:{totalMUSP:totalLast,totalFirst,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0||d.isNewEntry).length,declining:sorted.filter(d=>d.delta<0).length}};
-  },[rawData,dateRange,treatment,sortBy]);
+    return{months:allMonths,stats,treatSummary,globalHistory,totals,filteredStats,filteredTotals,filteredGlobalHistory,allRows:rows};
+  },[rawData,dateRange,treatment,sortBy,overviewTreat]);
 
   useEffect(()=>{if(months.length>1)setRange([0,months.length-1]);},[months.length]);
 
@@ -613,7 +666,7 @@ export default function Dashboard(){
       `}</style>
 
       {/* Doctor modal */}
-      {activeDoctor&&<DoctorModal doctor={activeDoctor} onClose={()=>setActiveDoctor(null)} dateRange={dateRange} months={months}/>}
+      {activeDoctor&&<DoctorModal doctor={activeDoctor} onClose={()=>setActiveDoctor(null)} dateRange={dateRange} months={months} allRows={allRows}/>}
 
       {/* Header */}
       <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 2px 12px rgba(37,99,235,0.18)"}}>
@@ -730,12 +783,12 @@ export default function Dashboard(){
 
         {/* Tabs */}
         <div style={{display:"flex",borderBottom:"1px solid #E2E8F0",marginBottom:16,background:"#fff",borderRadius:"16px 16px 0 0",padding:"0 8px"}}>
+          <button className={`tab-btn ${activeTab==="overview"?"active":""}`} onClick={()=>setActiveTab("overview")}>
+            <Globe size={14}/> Portfolio Overview
+          </button>
           <button className={`tab-btn ${activeTab==="doctors"?"active":""}`} onClick={()=>setActiveTab("doctors")}>
             <List size={14}/> Doctors
             {filterMode!=="all"&&<span style={{fontSize:10,background:"#EFF6FF",color:"#3B82F6",borderRadius:10,padding:"1px 7px",fontWeight:700}}>{filterMode}</span>}
-          </button>
-          <button className={`tab-btn ${activeTab==="overview"?"active":""}`} onClick={()=>setActiveTab("overview")}>
-            <Globe size={14}/> Portfolio Overview
           </button>
         </div>
 
@@ -852,39 +905,52 @@ export default function Dashboard(){
             <div className="card" style={{padding:"20px 24px",gridColumn:"1/-1"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
                 <div>
-                  <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>Total Portfolio MUSP</div>
-                  <div style={{fontSize:28,fontWeight:700,color:"#0F172A"}}>{fmt(totals.totalMUSP)}</div>
+                  <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>
+                    Total Portfolio MUSP {overviewTreat&&<span style={{color:T_COLORS[overviewTreat]||"#3B82F6"}}>— {overviewTreat}</span>}
+                  </div>
+                  <div style={{fontSize:28,fontWeight:700,color:"#0F172A"}}>{fmt(filteredTotals.totalMUSP)}</div>
                 </div>
                 <div style={{textAlign:"right"}}>
                   <div style={{fontSize:11,color:"#94A3B8",marginBottom:2}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
-                  <div style={{fontSize:20,fontWeight:700,color:totals.totalDelta>=0?"#10B981":"#EF4444"}}>
-                    {totals.totalDelta>=0?"+":""}{fmt(totals.totalDelta)} ({totals.totalPct!==null?`${totals.totalPct>=0?"+":""}${totals.totalPct.toFixed(1)}%`:"—"})
+                  <div style={{fontSize:20,fontWeight:700,color:filteredTotals.totalDelta>=0?"#10B981":"#EF4444"}}>
+                    {filteredTotals.totalDelta>=0?"+":""}{fmt(filteredTotals.totalDelta)} ({filteredTotals.totalPct!==null?`${filteredTotals.totalPct>=0?"+":""}${filteredTotals.totalPct.toFixed(1)}%`:"—"})
                   </div>
                 </div>
               </div>
-              <GlobalChart history={globalHistory}/>
+              <GlobalChart history={filteredGlobalHistory} color={overviewTreat?T_COLORS[overviewTreat]||"#3B82F6":undefined}/>
             </div>
             <div className="card" style={{padding:"20px 24px"}}>
-              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>Treatment breakdown</div>
-              {treatSummary.map(({t,v,pct})=>(
-                <div key={t} style={{marginBottom:14}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8"}}>{t}</span>
-                    <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400}}>({(pct*100).toFixed(0)}%)</span></span>
+              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                Treatment breakdown
+                {overviewTreat&&<span onClick={()=>setOverviewTreat(null)} style={{cursor:"pointer",color:"#3B82F6",fontSize:10,fontWeight:700}}>✕ Clear</span>}
+              </div>
+              {treatSummary.map(({t,v,pct})=>{
+                const isActive=overviewTreat===t;
+                return(
+                  <div key={t} style={{marginBottom:14,cursor:"pointer",opacity:overviewTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
+                    onClick={()=>setOverviewTreat(prev=>prev===t?null:t)}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
+                      <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8",display:"flex",alignItems:"center",gap:6}}>
+                        {isActive&&<span style={{fontSize:9,background:T_COLORS[t]||"#3B82F6",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>●</span>}
+                        {t}
+                      </span>
+                      <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400}}>({(pct*100).toFixed(0)}%)</span></span>
+                    </div>
+                    <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
+                      <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,
+                        boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:""}}/>
+                    </div>
                   </div>
-                  <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
-                    <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4}}/>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <div className="card" style={{padding:"20px 24px"}}>
               <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>All doctors — period change</div>
               <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                {[...stats].sort((a,b)=>b.delta-a.delta).map(d=>{
+                {[...filteredStats].sort((a,b)=>b.delta-a.delta).map(d=>{
                   const isUp=d.delta>0,isDown=d.delta<0;
                   const color=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
-                  const maxAbs=Math.max(...stats.map(s=>Math.abs(s.delta)),1);
+                  const maxAbs=Math.max(...filteredStats.map(s=>Math.abs(s.delta)),1);
                   return(
                     <div key={d.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:"1px solid #F8FAFC",cursor:"pointer"}}
                       onClick={()=>{setActiveDoctor(d);}}>
@@ -900,6 +966,18 @@ export default function Dashboard(){
             </div>
           </div>
         )}
+      </div>
+
+      {/* Footer */}
+      <div style={{
+        padding:"16px 32px",
+        borderTop:"1px solid #E2E8F0",
+        display:"flex",justifyContent:"space-between",alignItems:"center",
+        maxWidth:1400,margin:"24px auto 0",
+        background:"transparent"
+      }}>
+        <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v2.0</span>
+        <span style={{fontSize:11,color:"#CBD5E1"}}>Made with 🤙 by Antoine Heritier</span>
       </div>
     </div>
   );
