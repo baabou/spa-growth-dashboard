@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="32" fill="#1E3A5F"/>
+
+  <!-- Chart bars (growing) -->
+  <rect x="10" y="38" width="9" height="14" rx="2.5" fill="#3B82F6" opacity="0.6"/>
+  <rect x="22" y="30" width="9" height="22" rx="2.5" fill="#3B82F6" opacity="0.8"/>
+  <rect x="34" y="20" width="9" height="32" rx="2.5" fill="#3B82F6"/>
+  <rect x="46" y="12" width="9" height="40" rx="2.5" fill="#34D399"/>
+
+  <!-- Trend arrow up -->
+  <polyline points="10,36 22,28 34,18 46,10" fill="none" stroke="#34D399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  <circle cx="46" cy="10" r="3" fill="#34D399"/>
+</svg>
