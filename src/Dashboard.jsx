@@ -476,10 +476,25 @@ const Logo=()=>(
   </svg>
 );
 
-// ─── App ──────────────────────────────────────────────────────────────────────
+// ─── Google Sheets config ─────────────────────────────────────────────────────
+const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`;
+
+// ─── Footer ───────────────────────────────────────────────────────────────────
+const Footer=()=>(
+  <div style={{
+    padding:"16px 32px",
+    borderTop:"1px solid #E2E8F0",
+    display:"flex",justifyContent:"space-between",alignItems:"center",
+    maxWidth:1400,margin:"24px auto 0",
+  }}>
+    <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v3.0</span>
+    <span style={{fontSize:11,color:"#CBD5E1"}}>Made with 🤙 by Antoine Heritier</span>
+  </div>
+);
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [fileName,setFileName]=useState(null);
+  const [loadStatus,setLoadStatus]=useState("loading"); // "loading" | "ok" | "error"
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
   const [dateRange,setRange]=useState([0,1]);
@@ -488,48 +503,46 @@ export default function Dashboard(){
   const [filterMode,setFilter]=useState("all");
   const [activeDoctor,setActiveDoctor]=useState(null);
   const [overviewTreat,setOverviewTreat]=useState(null);
-
   const [csvError,setCsvError]=useState(null);
+  const [lastRefresh,setLastRefresh]=useState(null);
 
+  // Load from Google Sheets on mount
+  const loadFromSheets=useCallback(()=>{
+    setLoadStatus("loading");
+    setCsvError(null);
+    fetch(SHEET_URL)
+      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
+      .then(text=>{
+        const parsed=parseCSV(text);
+        if(!parsed||parsed.length===0)throw new Error("empty");
+        setRawData(parsed);
+        setLastRefresh(new Date());
+        setLoadStatus("ok");
+      })
+      .catch(()=>{
+        setLoadStatus("error");
+      });
+  },[]);
+
+  useEffect(()=>{loadFromSheets();},[loadFromSheets]);
+
+  // Manual CSV override (kept as fallback)
   const handleFile=useCallback(file=>{
     if(!file)return;
     setCsvError(null);
-    setFileName(file.name);
     const reader=new FileReader();
     reader.onload=e=>{
-      try {
+      try{
         const parsed=parseCSV(e.target.result);
-        if(!parsed||parsed.length===0){setCsvError("Le fichier est vide ou ne contient pas de données.");return;}
-        const sample=parsed[0];
-        const keys=Object.keys(sample);
-        // Check column count
-        if(keys.length<9){
-          setCsvError(`Format incorrect — ${keys.length} colonne(s) détectée(s), 9 minimum attendu.\nVérifiez que le fichier est bien un export DETAIL_1_MUSP.`);return;
-        }
-        // Check date column (col 6) — must look like YYYY-MM-DD
+        if(!parsed||parsed.length===0){setCsvError("File is empty.");return;}
+        const sample=parsed[0];const keys=Object.keys(sample);
+        if(keys.length<9){setCsvError(`Invalid format — ${keys.length} columns detected.`);return;}
         const dateVal=(sample[keys[6]]||"").substring(0,7);
-        if(!/^\d{4}-\d{2}$/.test(dateVal)){
-          setCsvError(`Colonne Date (col. 7) invalide : "${sample[keys[6]]||"vide"}".\nFormat attendu : YYYY-MM-DD.\nVérifiez que vous avez importé le bon fichier (DETAIL_1_MUSP).`);return;
-        }
-        // Check MUSP column (col 8) — must be numeric
+        if(!/^\d{4}-\d{2}$/.test(dateVal)){setCsvError(`Invalid Date column : "${sample[keys[6]]||"vide"}".`);return;}
         const muspVal=sample[keys[8]];
-        if(muspVal===undefined||muspVal===null||isNaN(parseInt(muspVal))){
-          setCsvError(`Colonne MUSP (col. 9) non numérique : "${muspVal??'vide'}".\nVérifiez que vous avez importé le bon fichier.`);return;
-        }
-        // Check that we have at least a few rows with dates
-        const validRows=parsed.filter(r=>{const k=Object.keys(r);return /^\d{4}-\d{2}/.test((r[k[6]]||""));});
-        if(validRows.length<3){
-          setCsvError(`Seulement ${validRows.length} ligne(s) valide(s) trouvée(s).\nLe fichier semble vide ou dans un format inattendu.`);return;
-        }
-        // Check doctor name column (col 5) is non-empty in majority of rows
-        const withDoctor=parsed.filter(r=>{const k=Object.keys(r);return (r[k[5]]||"").trim().length>0;});
-        if(withDoctor.length<parsed.length*0.5){
-          setCsvError(`La colonne Docteur (col. 6) semble vide dans la majorité des lignes.\nVérifiez que le fichier correspond au format DETAIL_1_MUSP.`);return;
-        }
-        setRawData(parsed);
-      } catch(err) {
-        setCsvError("Impossible de lire le fichier. Vérifiez qu'il s'agit bien d'un CSV valide.");
-      }
+        if(isNaN(parseInt(muspVal))){setCsvError(`Non-numeric MUSP column : "${muspVal??'vide'}".`);return;}
+        setRawData(parsed);setLoadStatus("ok");setLastRefresh(new Date());
+      }catch{setCsvError("Unable to read CSV file.");}
     };
     reader.readAsText(file);
   },[]);
@@ -625,23 +638,45 @@ export default function Dashboard(){
     </div>
   );
 
-  if(!rawData) return(
-    <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#F8FAFC",minHeight:"100vh"}}>
+  // Loading / error screen
+  if(loadStatus==="loading"||(!rawData&&loadStatus!=="error")) return(
+    <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#F8FAFC",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0;}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center"}}><Logo/></div>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
+        <div style={{width:40,height:40,border:"3px solid #E2E8F0",borderTopColor:"#3B82F6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+        <div style={{fontSize:14,color:"#94A3B8",fontWeight:500}}>Loading data…</div>
+      </div>
+      <Footer/>
+    </div>
+  );
+
+  if(loadStatus==="error"&&!rawData) return(
+    <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#F8FAFC",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0;}.upload-zone{border:2px dashed #CBD5E1;border-radius:20px;padding:64px 40px;text-align:center;cursor:pointer;transition:all 0.2s;background:#fff;}.upload-zone:hover,.upload-zone.drag{border-color:#3B82F6;background:#EFF6FF;}`}</style>
       <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{display:"flex",alignItems:"center",gap:20}}><Logo/><div style={{width:1,height:28,background:"rgba(255,255,255,0.2)"}}/><div><div style={{fontSize:13,fontWeight:600,color:"#fff"}}>SPA Growth Monitor</div><div style={{fontSize:10,color:"rgba(255,255,255,0.5)",textTransform:"uppercase",letterSpacing:"0.05em"}}>Monthly Unique Scanned Patients</div></div></div>
-        <label style={{cursor:"pointer"}}><input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/><div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600}}><Upload size={13}/> Import CSV</div></label>
+        <Logo/>
+        <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+          ↻ Retry
+        </button>
       </div>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 64px)",padding:40}}>
-        <label style={{cursor:"pointer",width:"100%",maxWidth:480}}>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:24,padding:40}}>
+        <div style={{fontSize:40}}>⚠️</div>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#0F172A",marginBottom:8}}>Unable to load data</div>
+          <div style={{fontSize:13,color:"#94A3B8",marginBottom:24}}>Make sure the Google Sheet is shared publicly (Viewer access).</div>
+          <button onClick={loadFromSheets} style={{padding:"10px 24px",background:"#3B82F6",color:"#fff",border:"none",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:24}}>↻ Retry</button>
+        </div>
+        <div style={{fontSize:12,color:"#CBD5E1",marginBottom:8}}>or load a CSV file manually</div>
+        <label style={{cursor:"pointer",width:"100%",maxWidth:400}}>
           <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
           <div className={`upload-zone ${isDragging?"drag":""}`} onDragOver={e=>{e.preventDefault();setIsDrag(true);}} onDragLeave={()=>setIsDrag(false)} onDrop={onDrop}>
-            <div style={{width:56,height:56,borderRadius:16,background:"#EFF6FF",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}><Upload size={26} color="#3B82F6"/></div>
-            <div style={{fontSize:18,fontWeight:700,color:"#0F172A",marginBottom:8}}>Drop your CSV here</div>
-            <div style={{fontSize:13,color:"#94A3B8"}}>or click to browse — DETAIL_1_MUSP format</div>
+            <div style={{fontSize:14,fontWeight:600,color:"#64748B"}}>📂 Drop a CSV here</div>
           </div>
         </label>
+        {csvError&&<div style={{fontSize:12,color:"#EF4444",maxWidth:400,textAlign:"center"}}>{csvError}</div>}
       </div>
+      <Footer/>
     </div>
   );
 
@@ -678,12 +713,18 @@ export default function Dashboard(){
             <div style={{fontSize:10,color:"rgba(255,255,255,0.5)",fontWeight:500,letterSpacing:"0.05em",textTransform:"uppercase",marginTop:1}}>Monthly Unique Scanned Patients</div>
           </div>
         </div>
-        <label style={{cursor:"pointer"}}>
-          <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
-          <div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
-            <Upload size={13}/> {fileName?"Change CSV":"Import CSV"}
-          </div>
-        </label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {lastRefresh&&<span style={{fontSize:11,color:"rgba(255,255,255,0.45)"}}>Updated at {lastRefresh.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</span>}
+          <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+            ↻ Refresh
+          </button>
+          <label style={{cursor:"pointer"}}>
+            <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+            <div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 14px",background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,color:"rgba(255,255,255,0.6)",fontSize:11,fontWeight:500,cursor:"pointer"}}>
+              <Upload size={11}/> CSV
+            </div>
+          </label>
+        </div>
       </div>
 
       {/* CSV Error banner */}
@@ -691,7 +732,7 @@ export default function Dashboard(){
         <div style={{background:"#FEF2F2",borderBottom:"1px solid #FECACA",padding:"12px 32px",display:"flex",alignItems:"flex-start",gap:12}}>
           <div style={{fontSize:18,lineHeight:1,flexShrink:0}}>⚠️</div>
           <div style={{flex:1}}>
-            <div style={{fontSize:13,fontWeight:600,color:"#DC2626",marginBottom:2}}>Format de fichier incorrect</div>
+            <div style={{fontSize:13,fontWeight:600,color:"#DC2626",marginBottom:2}}>Invalid file format</div>
             <div style={{fontSize:12,color:"#EF4444",whiteSpace:"pre-line"}}>{csvError}</div>
           </div>
           <button onClick={()=>{setCsvError(null);setFileName(null);}} style={{border:"none",background:"none",cursor:"pointer",color:"#EF4444",fontSize:18,lineHeight:1,padding:"0 4px",flexShrink:0}}>✕</button>
@@ -968,17 +1009,7 @@ export default function Dashboard(){
         )}
       </div>
 
-      {/* Footer */}
-      <div style={{
-        padding:"16px 32px",
-        borderTop:"1px solid #E2E8F0",
-        display:"flex",justifyContent:"space-between",alignItems:"center",
-        maxWidth:1400,margin:"24px auto 0",
-        background:"transparent"
-      }}>
-        <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v2.0</span>
-        <span style={{fontSize:11,color:"#CBD5E1"}}>Made with 🤙 by Antoine Heritier</span>
-      </div>
+      <Footer/>
     </div>
   );
 }
