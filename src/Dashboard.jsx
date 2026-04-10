@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Upload, TrendingUp, TrendingDown, List, Globe, X } from "lucide-react";
 
-const members = [
+const SPA_MEMBERS = [
   { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
   { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
   { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
@@ -10,7 +10,7 @@ const members = [
   { label: "Theo Baisi",                           csvNames: ["The Ortho Practice"] },
   { label: "Zak Sullivan",                         csvNames: ["Ocean Orthodontics", "Ocean Orthodontics (old)"] },
   { label: "Shabier Shaboodien",                   csvNames: ["Shabier Shaboodien"] },
-  { label: "Yann Taddei",                          csvNames: ["'@ Darwin Orthodontics"] },
+  { label: "Yann Taddei",                          csvNames: ["@ Darwin Orthodontics"] },
   { label: "Amanda Lawrence",                      csvNames: ["Amanda Lawrence"] },
   { label: "Reuben How",                           csvNames: ["Reuben How"] },
   { label: "Lasni Kumarasinghe",                   csvNames: ["MySmile Orthodontics"] },
@@ -476,6 +476,28 @@ const Logo=()=>(
   </svg>
 );
 
+// ─── Parse MEMBERS sheet ──────────────────────────────────────────────────────
+function parseMembers(text){
+  try{
+    const rows=parseCSV(text);
+    if(!rows||rows.length===0)return null;
+    return rows
+      .filter(r=>{const k=Object.keys(r);return (r[k[0]]||"").trim().length>0;})
+      .map(r=>{
+        const k=Object.keys(r);
+        const label=(r[k[0]]||"").trim();
+        const csvNamesRaw=(r[k[1]]||"").trim();
+        const csvNames=csvNamesRaw
+          ? csvNamesRaw.split(",").map(s=>s.trim().replace(/^'/,"")).filter(Boolean)
+          : [];
+        return{label,csvNames};
+      });
+  }catch(e){
+    console.error("parseMembers error",e);
+    return null;
+  }
+}
+
 // ─── Google Sheets config ─────────────────────────────────────────────────────
 const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
 const sheetUrl = (tab) =>
@@ -495,7 +517,7 @@ const Footer=()=>(
 );
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [members,setMembers]=useState(members); // fallback to hardcoded
+  const [members,setMembers]=useState(SPA_MEMBERS); // fallback to hardcoded
   const [loadStatus,setLoadStatus]=useState("loading");
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
@@ -508,36 +530,23 @@ export default function Dashboard(){
   const [csvError,setCsvError]=useState(null);
   const [lastRefresh,setLastRefresh]=useState(null);
 
-  // Parse MEMBERS sheet rows into {label, csvNames[]}
-  const parseMembers=(text)=>{
-    const rows=parseCSV(text);
-    return rows
-      .filter(r=>{const k=Object.keys(r);return (r[k[0]]||"").trim().length>0;})
-      .map(r=>{
-        const k=Object.keys(r);
-        const label=(r[k[0]]||"").trim();
-        const csvNamesRaw=(r[k[1]]||"").trim();
-        const csvNames=csvNamesRaw
-          ? csvNamesRaw.split(",").map(s=>s.trim()).filter(Boolean)
-          : [];
-        return{label,csvNames};
-      });
-  };
-
   // Load both DATA and MEMBERS tabs in parallel
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
     setCsvError(null);
-    Promise.all([
-      fetch(sheetUrl("DATA")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}),
-      fetch(sheetUrl("MEMBERS")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
-    ])
+    // Fetch DATA (required) + MEMBERS (optional, falls back to hardcoded)
+    const dataFetch=fetch(sheetUrl("DATA")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
+    const membersFetch=fetch(sheetUrl("MEMBERS")).then(r=>r.ok?r.text():null).catch(()=>null);
+
+    Promise.all([dataFetch,membersFetch])
       .then(([dataText,membersText])=>{
         const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
         setRawData(parsed);
-        const parsedMembers=parseMembers(membersText);
-        if(parsedMembers.length>0)setMembers(parsedMembers);
+        if(membersText){
+          const parsedMembers=parseMembers(membersText);
+          if(parsedMembers&&parsedMembers.length>0)setMembers(parsedMembers);
+        }
         setLastRefresh(new Date());
         setLoadStatus("ok");
       })
@@ -575,7 +584,7 @@ export default function Dashboard(){
 
   const{months,stats,treatSummary,totals,globalHistory,filteredStats,filteredTotals,filteredGlobalHistory,allRows}=useMemo(()=>{
     if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:[]};
-    const rows=rawData.map(r=>{const k=Object.keys(r);return{doctor:(r[k[5]]||"").trim(),date:(r[k[6]]||"").substring(0,7),treat:(r[k[7]]||"").trim(),musp:parseInt(r[k[8]])||0};}).filter(r=>r.date&&r.doctor);
+    const rows=rawData.map(r=>{const k=Object.keys(r);return{doctor:(r[k[5]]||"").trim().replace(/^'/,""),date:(r[k[6]]||"").substring(0,7),treat:(r[k[7]]||"").trim(),musp:parseInt(r[k[8]])||0};}).filter(r=>r.date&&r.doctor);
     const allMonths=[...new Set(rows.map(r=>r.date))].sort();
     if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:rows};
     const si=Math.min(dateRange[0],allMonths.length-1);
