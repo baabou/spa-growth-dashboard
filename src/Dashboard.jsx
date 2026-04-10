@@ -1,30 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Upload, TrendingUp, TrendingDown, List, Globe, X } from "lucide-react";
 
-const SPA_MEMBERS = [
-  { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
-  { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
-  { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
-  { label: "Wayne Chen",                           csvNames: ["Wayne Chen"] },
-  { label: "Chris Orloff",                         csvNames: ["Chris Orloff"] },
-  { label: "Theo Baisi",                           csvNames: ["The Ortho Practice"] },
-  { label: "Zak Sullivan",                         csvNames: ["Ocean Orthodontics", "Ocean Orthodontics (old)"] },
-  { label: "Shabier Shaboodien",                   csvNames: ["Shabier Shaboodien"] },
-  { label: "Yann Taddei",                          csvNames: ["@ Darwin Orthodontics"] },
-  { label: "Amanda Lawrence",                      csvNames: ["Amanda Lawrence"] },
-  { label: "Reuben How",                           csvNames: ["Reuben How"] },
-  { label: "Lasni Kumarasinghe",                   csvNames: ["MySmile Orthodontics"] },
-  { label: "David Bachmayer",                      csvNames: ["Bachmayer Orthodontics"] },
-  { label: "Helen Moon",     csvNames: [] },
-  { label: "Peter Wilkinson",csvNames: [] },
-  { label: "Jeff Lipshatz",  csvNames: [] },
-  { label: "Hashmat Popat",  csvNames: [] },
-  { label: "Bruce Baker",    csvNames: [] },
-  { label: "Crofton Daniels",csvNames: [] },
-  { label: "Julian Todres",  csvNames: [] },
-  { label: "Peter Munt",     csvNames: [] },
-];
-
 const TREATMENTS = ["Aligners","Braces","Pre-Treatment","Post-Treatment","Others"];
 const T_COLORS = { Aligners:"#3B82F6", Braces:"#6366F1", "Pre-Treatment":"#0EA5E9", "Post-Treatment":"#8B5CF6", Others:"#94A3B8" };
 
@@ -481,12 +457,15 @@ function parseMembers(text){
   try{
     const rows=parseCSV(text);
     if(!rows||rows.length===0)return null;
+    // Find the right column keys (case-insensitive)
+    const sampleKeys=Object.keys(rows[0]);
+    const labelKey=sampleKeys.find(k=>k.toLowerCase().includes("label"))||sampleKeys[0];
+    const csvKey=sampleKeys.find(k=>k.toLowerCase().includes("csv"))||sampleKeys[1];
     return rows
-      .filter(r=>{const k=Object.keys(r);return (r[k[0]]||"").trim().length>0;})
+      .filter(r=>(r[labelKey]||"").trim().length>0)
       .map(r=>{
-        const k=Object.keys(r);
-        const label=(r[k[0]]||"").trim();
-        const csvNamesRaw=(r[k[1]]||"").trim();
+        const label=(r[labelKey]||"").trim();
+        const csvNamesRaw=(r[csvKey]||"").trim();
         const csvNames=csvNamesRaw
           ? csvNamesRaw.split(",").map(s=>s.trim().replace(/^'/,"")).filter(Boolean)
           : [];
@@ -517,7 +496,7 @@ const Footer=()=>(
 );
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [members,setMembers]=useState(SPA_MEMBERS); // fallback to hardcoded
+  const [members,setMembers]=useState([]);
   const [loadStatus,setLoadStatus]=useState("loading");
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
@@ -534,19 +513,19 @@ export default function Dashboard(){
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
     setCsvError(null);
-    // Fetch DATA (required) + MEMBERS (optional, falls back to hardcoded)
-    const dataFetch=fetch(sheetUrl("DATA")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
-    const membersFetch=fetch(sheetUrl("MEMBERS")).then(r=>r.ok?r.text():null).catch(()=>null);
+    const dataFetch=fetch(sheetUrl("DATA"))
+      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
+      .catch(()=>fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}));
+    const membersFetch=fetch(sheetUrl("MEMBERS")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
 
     Promise.all([dataFetch,membersFetch])
       .then(([dataText,membersText])=>{
         const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
+        const parsedMembers=parseMembers(membersText);
+        if(!parsedMembers||parsedMembers.length===0)throw new Error("empty members");
         setRawData(parsed);
-        if(membersText){
-          const parsedMembers=parseMembers(membersText);
-          if(parsedMembers&&parsedMembers.length>0)setMembers(parsedMembers);
-        }
+        setMembers(parsedMembers);
         setLastRefresh(new Date());
         setLoadStatus("ok");
       })
@@ -570,7 +549,7 @@ export default function Dashboard(){
         if(!/^\d{4}-\d{2}$/.test(dateVal)){setCsvError(`Invalid Date column : "${sample[keys[6]]||"vide"}".`);return;}
         const muspVal=sample[keys[8]];
         if(isNaN(parseInt(muspVal))){setCsvError(`Non-numeric MUSP column : "${muspVal??'vide'}".`);return;}
-        setRawData(parsed);setMembers(SPA_MEMBERS);setLoadStatus("ok");setLastRefresh(new Date());
+        setRawData(parsed);setLoadStatus("ok");setLastRefresh(new Date());
       }catch{setCsvError("Unable to read CSV file.");}
     };
     reader.readAsText(file);
