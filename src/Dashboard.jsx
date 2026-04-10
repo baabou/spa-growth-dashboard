@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Upload, TrendingUp, TrendingDown, List, Globe, X } from "lucide-react";
 
-const SPA_MEMBERS = [
+const members = [
   { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
   { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
   { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
@@ -478,7 +478,8 @@ const Logo=()=>(
 
 // ─── Google Sheets config ─────────────────────────────────────────────────────
 const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
-const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`;
+const sheetUrl = (tab) =>
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(tab)}&cachebust=${Date.now()}`;
 
 // ─── Footer ───────────────────────────────────────────────────────────────────
 const Footer=()=>(
@@ -488,13 +489,14 @@ const Footer=()=>(
     display:"flex",justifyContent:"space-between",alignItems:"center",
     maxWidth:1400,margin:"24px auto 0",
   }}>
-    <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v3.0</span>
+    <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v4.0</span>
     <span style={{fontSize:11,color:"#CBD5E1"}}>Made with 🤙 by Antoine Heritier</span>
   </div>
 );
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [loadStatus,setLoadStatus]=useState("loading"); // "loading" | "ok" | "error"
+  const [members,setMembers]=useState(members); // fallback to hardcoded
+  const [loadStatus,setLoadStatus]=useState("loading");
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
   const [dateRange,setRange]=useState([0,1]);
@@ -506,22 +508,40 @@ export default function Dashboard(){
   const [csvError,setCsvError]=useState(null);
   const [lastRefresh,setLastRefresh]=useState(null);
 
-  // Load from Google Sheets on mount
+  // Parse MEMBERS sheet rows into {label, csvNames[]}
+  const parseMembers=(text)=>{
+    const rows=parseCSV(text);
+    return rows
+      .filter(r=>{const k=Object.keys(r);return (r[k[0]]||"").trim().length>0;})
+      .map(r=>{
+        const k=Object.keys(r);
+        const label=(r[k[0]]||"").trim();
+        const csvNamesRaw=(r[k[1]]||"").trim();
+        const csvNames=csvNamesRaw
+          ? csvNamesRaw.split(",").map(s=>s.trim()).filter(Boolean)
+          : [];
+        return{label,csvNames};
+      });
+  };
+
+  // Load both DATA and MEMBERS tabs in parallel
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
     setCsvError(null);
-    fetch(SHEET_URL)
-      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
-      .then(text=>{
-        const parsed=parseCSV(text);
+    Promise.all([
+      fetch(sheetUrl("DATA")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}),
+      fetch(sheetUrl("MEMBERS")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
+    ])
+      .then(([dataText,membersText])=>{
+        const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
         setRawData(parsed);
+        const parsedMembers=parseMembers(membersText);
+        if(parsedMembers.length>0)setMembers(parsedMembers);
         setLastRefresh(new Date());
         setLoadStatus("ok");
       })
-      .catch(()=>{
-        setLoadStatus("error");
-      });
+      .catch(()=>setLoadStatus("error"));
   },[]);
 
   useEffect(()=>{loadFromSheets();},[loadFromSheets]);
@@ -541,7 +561,7 @@ export default function Dashboard(){
         if(!/^\d{4}-\d{2}$/.test(dateVal)){setCsvError(`Invalid Date column : "${sample[keys[6]]||"vide"}".`);return;}
         const muspVal=sample[keys[8]];
         if(isNaN(parseInt(muspVal))){setCsvError(`Non-numeric MUSP column : "${muspVal??'vide'}".`);return;}
-        setRawData(parsed);setLoadStatus("ok");setLastRefresh(new Date());
+        setRawData(parsed);setMembers(SPA_MEMBERS);setLoadStatus("ok");setLastRefresh(new Date());
       }catch{setCsvError("Unable to read CSV file.");}
     };
     reader.readAsText(file);
@@ -562,12 +582,12 @@ export default function Dashboard(){
     const ei=Math.min(Math.max(dateRange[1],si+1),allMonths.length-1);
     const selMonths=allMonths.slice(si,ei+1);
     const firstM=allMonths[si],lastM=allMonths[ei];
-    const allCsvNames=new Set(SPA_MEMBERS.flatMap(m=>m.csvNames));
+    const allCsvNames=new Set(members.flatMap(m=>m.csvNames));
 
     // Helper: build stats for a given row filter
     const buildStats=(rowFilter)=>{
       const tRows=rowFilter?rows.filter(rowFilter):rows;
-      const memberStats=SPA_MEMBERS.map(member=>{
+      const memberStats=members.map(member=>{
         const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
         const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
         const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
@@ -617,7 +637,7 @@ export default function Dashboard(){
     const treatSummary=Object.entries(treatMap).map(([t,v])=>({t,v,pct:tTotal>0?v/tTotal:0})).sort((a,b)=>b.v-a.v);
 
     return{months:allMonths,stats,treatSummary,globalHistory,totals,filteredStats,filteredTotals,filteredGlobalHistory,allRows:rows};
-  },[rawData,dateRange,treatment,sortBy,overviewTreat]);
+  },[rawData,dateRange,treatment,sortBy,overviewTreat,members]);
 
   useEffect(()=>{if(months.length>1)setRange([0,months.length-1]);},[months.length]);
 
@@ -790,7 +810,7 @@ export default function Dashboard(){
           {/* 3 stat pills */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
             {[
-              {label:"Doctors tracked",value:SPA_MEMBERS.length,color:"#6366F1",bg:"#EEF2FF",mode:null,badge:"👨‍⚕️",sub:"SPA members"},
+              {label:"Doctors tracked",value:members.length,color:"#6366F1",bg:"#EEF2FF",mode:null,badge:"👨‍⚕️",sub:"SPA members"},
               {label:"Growing",value:totals.growing??0,color:"#10B981",bg:"#ECFDF5",mode:"growing",badge:"↑",sub:"click to filter"},
               {label:"Declining",value:totals.declining??0,color:"#EF4444",bg:"#FEF2F2",mode:"declining",badge:"↓",sub:"click to filter"},
             ].map(k=>(
