@@ -453,6 +453,31 @@ const Logo=()=>(
 );
 
 // ─── Parse MEMBERS sheet ──────────────────────────────────────────────────────
+// ─── SPA Members fallback (used if MEMBERS sheet fails to load) ───────────────
+const SPA_MEMBERS = [
+  { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
+  { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
+  { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
+  { label: "Wayne Chen",                           csvNames: ["Wayne Chen"] },
+  { label: "Chris Orloff",                         csvNames: ["Chris Orloff"] },
+  { label: "Theo Baisi",                           csvNames: ["The Ortho Practice"] },
+  { label: "Zak Sullivan",                         csvNames: ["Ocean Orthodontics","Ocean Orthodontics (old)"] },
+  { label: "Shabier Shaboodien",                   csvNames: ["Shabier Shaboodien"] },
+  { label: "Yann Taddei",                          csvNames: ["@ Darwin Orthodontics"] },
+  { label: "Amanda Lawrence",                      csvNames: ["Amanda Lawrence"] },
+  { label: "Reuben How",                           csvNames: ["Reuben How"] },
+  { label: "Lasni Kumarasinghe",                   csvNames: ["MySmile Orthodontics"] },
+  { label: "David Bachmayer",                      csvNames: ["Bachmayer Orthodontics"] },
+  { label: "Helen Moon",      csvNames: [] },
+  { label: "Peter Wilkinson", csvNames: [] },
+  { label: "Jeff Lipshatz",   csvNames: [] },
+  { label: "Hashmat Popat",   csvNames: [] },
+  { label: "Bruce Baker",     csvNames: [] },
+  { label: "Crofton Daniels", csvNames: [] },
+  { label: "Julian Todres",   csvNames: [] },
+  { label: "Peter Munt",      csvNames: [] },
+];
+
 function parseMembers(text){
   try{
     const rows=parseCSV(text);
@@ -496,7 +521,7 @@ const Footer=()=>(
 );
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [members,setMembers]=useState([]);
+  const [members,setMembers]=useState(SPA_MEMBERS);
   const [loadStatus,setLoadStatus]=useState("loading");
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
@@ -513,19 +538,25 @@ export default function Dashboard(){
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
     setCsvError(null);
+    // DATA is required. MEMBERS is optional — falls back to SPA_MEMBERS.
     const dataFetch=fetch(sheetUrl("DATA"))
       .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
-      .catch(()=>fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}));
-    const membersFetch=fetch(sheetUrl("MEMBERS")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
+      .catch(()=>fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`)
+        .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}));
+    const membersFetch=fetch(sheetUrl("MEMBERS"))
+      .then(r=>r.ok?r.text():null)
+      .catch(()=>null);
 
     Promise.all([dataFetch,membersFetch])
       .then(([dataText,membersText])=>{
         const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
-        const parsedMembers=parseMembers(membersText);
-        if(!parsedMembers||parsedMembers.length===0)throw new Error("empty members");
         setRawData(parsed);
-        setMembers(parsedMembers);
+        if(membersText){
+          const parsedMembers=parseMembers(membersText);
+          if(parsedMembers&&parsedMembers.length>0)setMembers(parsedMembers);
+          // else keep SPA_MEMBERS already set as default
+        }
         setLastRefresh(new Date());
         setLoadStatus("ok");
       })
