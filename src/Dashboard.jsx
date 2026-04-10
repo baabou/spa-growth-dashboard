@@ -1,6 +1,57 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Upload, TrendingUp, TrendingDown, List, Globe, X } from "lucide-react";
 
+// ─── Google Sheets ────────────────────────────────────────────────────────────
+const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
+const sheetUrl = tab => `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(tab)}&t=${Date.now()}`;
+
+function parseMembers(text) {
+  try {
+    const lines = text.trim().split("\n");
+    const headers = lines[0].split(",").map(h => h.replace(/^"|"$/g, "").trim());
+    const labelKey = headers.find(h => h.toLowerCase().includes("label")) || headers[0];
+    const csvKey   = headers.find(h => h.toLowerCase().includes("csv"))   || headers[1];
+    return lines.slice(1)
+      .map(line => {
+        const vals = []; let inQ = false, cur = "";
+        for (const ch of line) { if (ch==='"') inQ=!inQ; else if (ch===','&&!inQ){vals.push(cur.trim());cur="";} else cur+=ch; }
+        vals.push(cur.trim());
+        const obj = {}; headers.forEach((h,i) => { obj[h] = vals[i]||""; });
+        const label = (obj[labelKey]||"").trim();
+        if (!label) return null;
+        const raw = (obj[csvKey]||"").trim();
+        const csvNames = raw ? raw.split(",").map(s => s.trim().replace(/^'/,"")).filter(Boolean) : [];
+        return { label, csvNames };
+      })
+      .filter(Boolean);
+  } catch(e) { console.error("parseMembers error", e); return null; }
+}
+
+// ─── Fallback member list ────────────────────────────────────────────────────
+const SPA_MEMBERS_FALLBACK = [
+  { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
+  { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
+  { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
+  { label: "Wayne Chen",                           csvNames: ["Wayne Chen"] },
+  { label: "Chris Orloff",                         csvNames: ["Chris Orloff"] },
+  { label: "Theo Baisi",                           csvNames: ["The Ortho Practice"] },
+  { label: "Zak Sullivan",                         csvNames: ["Ocean Orthodontics", "Ocean Orthodontics (old)"] },
+  { label: "Shabier Shaboodien",                   csvNames: ["Shabier Shaboodien"] },
+  { label: "Yann Taddei",                          csvNames: ["@ Darwin Orthodontics"] },
+  { label: "Amanda Lawrence",                      csvNames: ["Amanda Lawrence"] },
+  { label: "Reuben How",                           csvNames: ["Reuben How"] },
+  { label: "Lasni Kumarasinghe",                   csvNames: ["MySmile Orthodontics"] },
+  { label: "David Bachmayer",                      csvNames: ["Bachmayer Orthodontics"] },
+  { label: "Helen Moon",      csvNames: [] },
+  { label: "Peter Wilkinson", csvNames: [] },
+  { label: "Jeff Lipshatz",   csvNames: [] },
+  { label: "Hashmat Popat",   csvNames: [] },
+  { label: "Bruce Baker",     csvNames: [] },
+  { label: "Crofton Daniels", csvNames: [] },
+  { label: "Julian Todres",   csvNames: [] },
+  { label: "Peter Munt",      csvNames: [] },
+];
+
 const TREATMENTS = ["Aligners","Braces","Pre-Treatment","Post-Treatment","Others"];
 const T_COLORS = { Aligners:"#3B82F6", Braces:"#6366F1", "Pre-Treatment":"#0EA5E9", "Post-Treatment":"#8B5CF6", Others:"#94A3B8" };
 
@@ -42,7 +93,7 @@ function RangeSlider({min,max,values,onChange,labels}){
   );
 }
 
-// ─── Sparkline (table row) ────────────────────────────────────────────────────
+// ─── Sparkline ────────────────────────────────────────────────────────────────
 function Sparkline({data,color}){
   if(!data||data.length<2)return<div style={{width:64}}/>;
   const vals=data.map(d=>d.value),max=Math.max(...vals,1),w=64,h=24;
@@ -53,376 +104,197 @@ function Sparkline({data,color}){
   </svg>);
 }
 
-// ─── Line Chart with Y-axis scale — pixel-accurate ───────────────────────────
-function LineChart({history,color,height=200}){
+// ─── Line Chart ───────────────────────────────────────────────────────────────
+function LineChart({history,color,height=120}){
   const [hov,setHov]=useState(null);
-  const [W,setW]=useState(500);
-  const containerRef=useRef(null);
-
-  useEffect(()=>{
-    const el=containerRef.current; if(!el)return;
-    const ro=new ResizeObserver(([e])=>setW(e.contentRect.width));
-    ro.observe(el); return()=>ro.disconnect();
-  },[]);
-
-  if(!history||history.length<2)return<div ref={containerRef}/>;
-
+  if(!history||history.length<2)return null;
   const vals=history.map(h=>h.value);
-  const dataMax=Math.max(...vals,1);
-  const rawMin=Math.min(...vals);
-  // Option C: keep 0 as baseline, proportional scale
-  const dataMin=0;
+  const dataMax=Math.max(...vals,1),dataMin=Math.min(...vals,0);
   const range=dataMax-dataMin||1;
-
-  const PADL=46,PADR=12,PADT=12,PADB=8;
-  const chartW=W-PADL-PADR;
-  const chartH=height-PADT-PADB;
-
-  const toX=i=>PADL+(i/(history.length-1))*chartW;
-  const toY=v=>PADT+((dataMax-v)/range)*chartH;
-
+  const PADL=40,PADR=8,PADT=12,PADB=4;
+  const toX=i=>PADL+(i/(history.length-1))*(100-PADL-PADR);
+  const toY=v=>PADT+((dataMax-v)/range)*(height-PADT-PADB);
   const pts=history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ");
-  const area=`${toX(0)},${height-PADB} `+history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ")+` ${toX(history.length-1)},${height-PADB}`;
-
-  // Nice Y ticks
+  const area=`${toX(0)},${height} `+history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ")+` ${toX(history.length-1)},${height}`;
   const nTicks=4;
-  const rawStep=range/nTicks;
-  const mag=Math.pow(10,Math.floor(Math.log10(rawStep)));
-  const tickStep=Math.ceil(rawStep/mag)*mag||1;
-  const ticks=[];
-  for(let t=Math.floor(dataMin/tickStep)*tickStep;t<=dataMax+tickStep;t+=tickStep){
-    if(t>=dataMin-tickStep*0.1&&t<=dataMax+tickStep*0.1)ticks.push(t);
-  }
-
+  const tickStep=Math.ceil(range/nTicks/10)*10||1;
+  const ticks=[];for(let t=Math.floor(dataMin/tickStep)*tickStep;t<=dataMax+tickStep;t+=tickStep){if(t>=dataMin&&t<=dataMax+1)ticks.push(t);}
   const gradId=`grad${color.replace(/[^a-z0-9]/gi,"")}`;
-
-  // Tooltip position clamped inside container
-  const hovX=hov!==null?toX(hov):0;
-  const tooltipW=120;
-  const tooltipLeft=Math.max(0,Math.min(W-tooltipW, hovX-tooltipW/2));
-
   return(
-    <div ref={containerRef} style={{position:"relative",userSelect:"none",marginTop:8,marginBottom:4}}>
+    <div style={{position:"relative",userSelect:"none",marginTop:16,marginBottom:4}}>
       {hov!==null&&(
-        <div style={{
-          position:"absolute",top:0,left:tooltipLeft,
-          background:"#1E293B",color:"#fff",borderRadius:8,padding:"5px 10px",
-          fontSize:11,fontWeight:600,whiteSpace:"nowrap",zIndex:10,pointerEvents:"none",
-          boxShadow:"0 4px 12px rgba(0,0,0,0.18)",width:tooltipW,textAlign:"center"
-        }}>
-          <span style={{color:"#94A3B8",fontWeight:400}}>{fmtMonth(history[hov].month)} </span>{history[hov].value}
+        <div style={{position:"absolute",top:-38,left:`calc(${((toX(hov)-PADL)/(100-PADL-PADR))*100}% + ${PADL}px - 52px)`,
+          background:"#1E293B",color:"#fff",borderRadius:8,padding:"5px 10px",fontSize:11,fontWeight:600,whiteSpace:"nowrap",zIndex:10,pointerEvents:"none",boxShadow:"0 4px 12px rgba(0,0,0,0.18)"}}>
+          <span style={{color:"#94A3B8",fontWeight:400}}>{fmtMonth(history[hov].month)} </span>{history[hov].value} MUSP
+          <div style={{position:"absolute",bottom:-5,left:"50%",transform:"translateX(-50%) rotate(45deg)",width:8,height:8,background:"#1E293B"}}/>
         </div>
       )}
-      <svg width={W} height={height} style={{display:"block",overflow:"visible"}}
+      <svg viewBox={`0 0 100 ${height}`} style={{width:"100%",height:height+20,overflow:"visible"}} preserveAspectRatio="none"
         onMouseLeave={()=>setHov(null)}>
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.2"/>
+            <stop offset="0%" stopColor={color} stopOpacity="0.18"/>
             <stop offset="100%" stopColor={color} stopOpacity="0"/>
           </linearGradient>
-          <clipPath id={`clip${gradId}`}>
-            <rect x={PADL} y={0} width={chartW} height={height}/>
-          </clipPath>
         </defs>
-        {/* Grid + Y ticks */}
         {ticks.map(t=>(
           <g key={t}>
-            <line x1={PADL} y1={toY(t)} x2={W-PADR} y2={toY(t)} stroke="#F1F5F9" strokeWidth={1}/>
-            <text x={PADL-6} y={toY(t)} textAnchor="end" fontSize={10} fill="#94A3B8" dominantBaseline="middle">{t.toLocaleString()}</text>
+            <line x1={PADL-1} y1={toY(t)} x2={100-PADR} y2={toY(t)} stroke="#F1F5F9" strokeWidth={0.4}/>
+            <text x={PADL-3} y={toY(t)+1} textAnchor="end" fontSize={4} fill="#94A3B8" dominantBaseline="middle">{t}</text>
           </g>
         ))}
-        {/* Y axis */}
-        <line x1={PADL} y1={PADT} x2={PADL} y2={height-PADB} stroke="#E2E8F0" strokeWidth={1}/>
-        {/* Area fill */}
-        <polygon points={area} fill={`url(#${gradId})`} clipPath={`url(#clip${gradId})`}/>
-        {/* Line */}
-        <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
-        {/* Hover zones + dots */}
+        <line x1={PADL} y1={PADT} x2={PADL} y2={height} stroke="#E2E8F0" strokeWidth={0.5}/>
+        <polygon points={area} fill={`url(#${gradId})`}/>
+        <polyline points={pts} fill="none" stroke={color} strokeWidth={1.2} strokeLinejoin="round" strokeLinecap="round"/>
         {history.map((h,i)=>(
           <g key={i} onMouseEnter={()=>setHov(i)} style={{cursor:"pointer"}}>
-            <rect x={toX(i)-chartW/history.length/2} y={0} width={chartW/history.length} height={height} fill="transparent"/>
-            <circle cx={toX(i)} cy={toY(h.value)} r={hov===i?5:3}
-              fill={hov===i?color:"#fff"} stroke={color} strokeWidth={2} style={{transition:"r 0.1s"}}/>
+            <rect x={toX(i)-((100-PADL-PADR)/history.length/2)} y={0} width={(100-PADL-PADR)/history.length} height={height} fill="transparent"/>
+            <circle cx={toX(i)} cy={toY(h.value)} r={hov===i?3.5:2}
+              fill={hov===i?color:"#fff"} stroke={color} strokeWidth={1.2} style={{transition:"r 0.1s"}}/>
           </g>
         ))}
-        {/* X axis labels */}
+      </svg>
+      <div style={{display:"flex",marginLeft:`${PADL}%`,marginRight:`${PADR}%`,marginTop:-4}}>
         {history.map((h,i)=>{
           const show=i===0||i===history.length-1||history.length<=6||i%Math.ceil(history.length/5)===0;
-          return show?(
-            <text key={i} x={toX(i)} y={height} textAnchor="middle" fontSize={10}
-              fill={hov===i?"#3B82F6":"#94A3B8"} fontWeight={hov===i?700:400}>
-              {fmtMonth(h.month).split(" ")[0]}
-            </text>
-          ):null;
+          return(<div key={i} style={{flex:1,textAlign:"center"}}>
+            {show&&<span style={{fontSize:9,color:hov===i?"#3B82F6":"#94A3B8",fontWeight:hov===i?700:400}}>{fmtMonth(h.month).split(" ")[0]}</span>}
+          </div>);
         })}
-      </svg>
+      </div>
     </div>
   );
 }
 
-// ─── Global Chart — pixel-accurate ───────────────────────────────────────────
-function GlobalChart({history,color="#3B82F6"}){
+// ─── Global Chart ─────────────────────────────────────────────────────────────
+function GlobalChart({history}){
   const [hov,setHov]=useState(null);
-  const [W,setW]=useState(800);
-  const containerRef=useRef(null);
-
-  useEffect(()=>{
-    const el=containerRef.current; if(!el)return;
-    const ro=new ResizeObserver(([e])=>setW(e.contentRect.width));
-    ro.observe(el); return()=>ro.disconnect();
-  },[]);
-
-  if(!history||history.length<2)return<div ref={containerRef}/>;
-
+  if(!history||history.length<2)return null;
   const vals=history.map(h=>h.value);
-  const dataMax=Math.max(...vals,1);
-  const rawMin=Math.min(...vals);
-  // Option C: keep 0 as baseline
-  const dataMin=0;
+  const dataMax=Math.max(...vals,1),dataMin=Math.min(...vals,0);
   const range=dataMax-dataMin||1;
-  const H=220;
-  const PADL=56,PADR=16,PADT=16,PADB=20;
-  const chartW=W-PADL-PADR;
-  const chartH=H-PADT-PADB;
-
-  const toX=i=>PADL+(i/(history.length-1))*chartW;
-  const toY=v=>PADT+((dataMax-v)/range)*chartH;
-
+  const PADL=44,PADR=8,PADT=14,PADB=4,H=130;
+  const toX=i=>PADL+(i/(history.length-1))*(100-PADL-PADR);
+  const toY=v=>PADT+((dataMax-v)/range)*(H-PADT-PADB);
   const pts=history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ");
-  const area=`${toX(0)},${H-PADB} `+history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ")+` ${toX(history.length-1)},${H-PADB}`;
-
-  const nTicks=5;
-  const rawStep=range/nTicks;
-  const mag=Math.pow(10,Math.floor(Math.log10(rawStep||1)));
-  const tickStep=Math.ceil(rawStep/mag)*mag||1;
-  const ticks=[];
-  for(let t=Math.floor(dataMin/tickStep)*tickStep;t<=dataMax+tickStep;t+=tickStep){
-    if(t>=dataMin-tickStep*0.1&&t<=dataMax+tickStep*0.1)ticks.push(t);
-  }
-
-  const hovX=hov!==null?toX(hov):0;
-  const tooltipW=150;
-  const tooltipLeft=Math.max(0,Math.min(W-tooltipW, hovX-tooltipW/2));
-
+  const area=`${toX(0)},${H} `+history.map((h,i)=>`${toX(i)},${toY(h.value)}`).join(" ")+` ${toX(history.length-1)},${H}`;
+  const nTicks=5,tickStep=Math.ceil(range/nTicks/100)*100||Math.ceil(range/nTicks/10)*10||1;
+  const ticks=[];for(let t=Math.floor(dataMin/tickStep)*tickStep;t<=dataMax+tickStep;t+=tickStep){if(t>=dataMin&&t<=dataMax+1)ticks.push(t);}
   return(
-    <div ref={containerRef} style={{position:"relative",userSelect:"none"}}>
+    <div style={{position:"relative",userSelect:"none"}}>
       {hov!==null&&(
-        <div style={{
-          position:"absolute",top:4,left:tooltipLeft,
-          background:"#1E293B",color:"#fff",borderRadius:8,padding:"5px 12px",
-          fontSize:11,fontWeight:600,whiteSpace:"nowrap",zIndex:10,pointerEvents:"none",
-          boxShadow:"0 4px 12px rgba(0,0,0,0.18)",width:tooltipW,textAlign:"center"
-        }}>
+        <div style={{position:"absolute",top:-38,left:`calc(${((toX(hov)-PADL)/(100-PADL-PADR))*100}% + ${PADL}px - 60px)`,
+          background:"#1E293B",color:"#fff",borderRadius:8,padding:"5px 12px",fontSize:11,fontWeight:600,whiteSpace:"nowrap",zIndex:10,pointerEvents:"none",boxShadow:"0 4px 12px rgba(0,0,0,0.18)"}}>
           <span style={{color:"#94A3B8",fontWeight:400}}>{fmtMonth(history[hov].month)} </span>{history[hov].value.toLocaleString()} MUSP
+          <div style={{position:"absolute",bottom:-5,left:"50%",transform:"translateX(-50%) rotate(45deg)",width:8,height:8,background:"#1E293B"}}/>
         </div>
       )}
-      <svg width={W} height={H} style={{display:"block",overflow:"visible"}}
+      <svg viewBox={`0 0 100 ${H}`} style={{width:"100%",height:H+24,overflow:"visible"}} preserveAspectRatio="none"
         onMouseLeave={()=>setHov(null)}>
         <defs>
-          <linearGradient id="gGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.2"/>
-            <stop offset="100%" stopColor={color} stopOpacity="0"/>
+          <linearGradient id="globalGrad2" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.2"/>
+            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0"/>
           </linearGradient>
-          <clipPath id="gClip"><rect x={PADL} y={0} width={chartW} height={H}/></clipPath>
         </defs>
         {ticks.map(t=>(
           <g key={t}>
-            <line x1={PADL} y1={toY(t)} x2={W-PADR} y2={toY(t)} stroke="#F1F5F9" strokeWidth={1}/>
-            <text x={PADL-6} y={toY(t)} textAnchor="end" fontSize={11} fill="#94A3B8" dominantBaseline="middle">{t.toLocaleString()}</text>
+            <line x1={PADL} y1={toY(t)} x2={100-PADR} y2={toY(t)} stroke="#F1F5F9" strokeWidth={0.4}/>
+            <text x={PADL-3} y={toY(t)+0.5} textAnchor="end" fontSize={3.8} fill="#94A3B8" dominantBaseline="middle">{t.toLocaleString()}</text>
           </g>
         ))}
-        <line x1={PADL} y1={PADT} x2={PADL} y2={H-PADB} stroke="#E2E8F0" strokeWidth={1}/>
-        <polygon points={area} fill="url(#gGrad)" clipPath="url(#gClip)"/>
-        <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
+        <line x1={PADL} y1={PADT} x2={PADL} y2={H} stroke="#E2E8F0" strokeWidth={0.5}/>
+        <polygon points={area} fill="url(#globalGrad2)"/>
+        <polyline points={pts} fill="none" stroke="#3B82F6" strokeWidth={1.4} strokeLinejoin="round" strokeLinecap="round"/>
         {history.map((h,i)=>(
           <g key={i} onMouseEnter={()=>setHov(i)} style={{cursor:"pointer"}}>
-            <rect x={toX(i)-chartW/history.length/2} y={0} width={chartW/history.length} height={H} fill="transparent"/>
-            <circle cx={toX(i)} cy={toY(h.value)} r={hov===i?5:3}
-              fill={hov===i?color:"#fff"} stroke={color} strokeWidth={2} style={{transition:"r 0.1s"}}/>
+            <rect x={toX(i)-((100-PADL-PADR)/history.length/2)} y={0} width={(100-PADL-PADR)/history.length} height={H} fill="transparent"/>
+            <circle cx={toX(i)} cy={toY(h.value)} r={hov===i?4:2.5}
+              fill={hov===i?"#3B82F6":"#fff"} stroke="#3B82F6" strokeWidth={1.5} style={{transition:"r 0.1s"}}/>
           </g>
         ))}
+      </svg>
+      <div style={{display:"flex",marginLeft:`${PADL}%`,marginRight:`${PADR}%`,marginTop:-4}}>
         {history.map((h,i)=>{
           const show=i===0||i===history.length-1||history.length<=8||i%Math.ceil(history.length/6)===0;
-          return show?(
-            <text key={i} x={toX(i)} y={H} textAnchor="middle" fontSize={11}
-              fill={hov===i?color:"#94A3B8"} fontWeight={hov===i?700:400}>
-              {fmtMonth(h.month).split(" ")[0]}
-            </text>
-          ):null;
+          return(<div key={i} style={{flex:1,textAlign:"center"}}>
+            {show&&<span style={{fontSize:10,color:hov===i?"#3B82F6":"#94A3B8",fontWeight:hov===i?700:400}}>{fmtMonth(h.month).split(" ")[0]}</span>}
+          </div>);
         })}
-      </svg>
+      </div>
     </div>
   );
 }
 
-// ─── Doctor Modal (centered overlay) ─────────────────────────────────────────
-function DoctorModal({doctor,onClose,dateRange,months,allRows}){
+// ─── Doctor Modal ─────────────────────────────────────────────────────────────
+function DoctorModal({doctor,onClose,dateRange,months}){
   if(!doctor)return null;
   const {label,csvNames,lastVal,firstVal,delta,pct,avgMonthly,breakdown,history}=doctor;
-  const isUp=delta>0||doctor.isNewEntry,isDown=delta<0;
+  const isUp=delta>0,isDown=delta<0;
   const color=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
-  const accentBg=isUp?"#ECFDF5":isDown?"#FEF2F2":"#F8FAFC";
-
-  const [activeTreat,setActiveTreat]=useState(null);
-
-  // Build per-treatment filtered history when a treatment is selected
-  const chartHistory=useMemo(()=>{
-    if(!activeTreat)return history;
-    const selMonths=history.map(h=>h.month);
-    const monthMap={};
-    (allRows||[]).filter(r=>csvNames.includes(r.doctor)&&r.treat===activeTreat&&selMonths.includes(r.date))
-      .forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
-    return selMonths.map(m=>({month:m,value:monthMap[m]||0}));
-  },[activeTreat,history,allRows,csvNames]);
-
-  // Compute stats for the active treatment filter (or global if none)
-  const filteredVals=useMemo(()=>{
-    if(!activeTreat||!chartHistory||chartHistory.length===0)return{lastVal,firstVal,delta,pct,avgMonthly};
-    const fLastVal=chartHistory[chartHistory.length-1]?.value??0;
-    const fFirstVal=chartHistory[0]?.value??0;
-    const fDelta=fLastVal-fFirstVal;
-    const fPct=fFirstVal>0?fDelta/fFirstVal*100:null;
-    const histVals=chartHistory.map(h=>h.value);
-    const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
-    const fAvg=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
-    return{lastVal:fLastVal,firstVal:fFirstVal,delta:fDelta,pct:fPct,avgMonthly:fAvg};
-  },[activeTreat,chartHistory,lastVal,firstVal,delta,pct,avgMonthly]);
-
-  const treatColor=activeTreat?T_COLORS[activeTreat]||"#3B82F6":color;
-  const dispColor=activeTreat?treatColor:(isUp?"#10B981":isDown?"#EF4444":"#94A3B8");
-
-  // close on Escape
   useEffect(()=>{
     const handler=e=>{if(e.key==="Escape")onClose();};
     window.addEventListener("keydown",handler);
     return()=>window.removeEventListener("keydown",handler);
   },[onClose]);
-
   return(
     <>
-      <style>{`
-        @keyframes backdropIn{from{opacity:0}to{opacity:1}}
-        @keyframes modalPop{from{opacity:0;transform:translate(-50%,-48%) scale(0.96)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
-      `}</style>
-
-      {/* Backdrop — blurred */}
-      <div onClick={onClose} style={{
-        position:"fixed",inset:0,zIndex:200,
-        background:"rgba(15,23,42,0.55)",
-        backdropFilter:"blur(6px)",
-        WebkitBackdropFilter:"blur(6px)",
-        animation:"backdropIn 0.2s ease"
-      }}/>
-
-      {/* Close button — fixed top-right of viewport */}
-      <button onClick={onClose} style={{
-        position:"fixed", top:20, right:20, zIndex:210,
-        border:"none", background:"rgba(255,255,255,0.95)", borderRadius:12,
-        width:40, height:40, display:"flex", alignItems:"center", justifyContent:"center",
-        cursor:"pointer", boxShadow:"0 2px 12px rgba(0,0,0,0.18)",
-        backdropFilter:"blur(4px)"
-      }}>
-        <X size={16} color="#1E293B"/>
-      </button>
-
-      {/* Modal card */}
-      <div style={{
-        position:"fixed",top:"50%",left:"50%",
-        transform:"translate(-50%,-50%)",
-        zIndex:201,
-        width:"min(860px,92vw)",
-        maxHeight:"88vh",
-        overflowY:"auto",
-        background:"#fff",
-        borderRadius:24,
-        boxShadow:"0 32px 80px rgba(0,0,0,0.22), 0 0 0 1px rgba(0,0,0,0.06)",
-        animation:"modalPop 0.25s cubic-bezier(0.34,1.56,0.64,1)",
-        display:"grid",
-        gridTemplateColumns:"1fr 1fr",
-      }}>
-
-        {/* ── LEFT COLUMN ── */}
-        <div style={{padding:"32px 28px 32px 32px",borderRight:"1px solid #F1F5F9"}}>
-
-          {/* Doctor name header */}
-          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
-            <div style={{
-              width:44,height:44,borderRadius:14,
-              background:accentBg,
-              display:"flex",alignItems:"center",justifyContent:"center",
-              flexShrink:0
-            }}>
-              <div style={{width:14,height:14,borderRadius:"50%",background:color}}/>
+      <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.4)",backdropFilter:"blur(4px)",zIndex:100}}/>
+      <div style={{position:"fixed",top:0,right:0,height:"100vh",width:520,background:"#fff",zIndex:101,
+        boxShadow:"-4px 0 40px rgba(0,0,0,0.12)",overflowY:"auto"}}>
+        <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}}`}</style>
+        <div style={{padding:"24px 28px 20px",borderBottom:"1px solid #F1F5F9",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+              <div style={{width:10,height:10,borderRadius:"50%",background:color}}/>
+              <div style={{fontSize:18,fontWeight:700,color:"#0F172A",letterSpacing:"-0.02em"}}>{label}</div>
             </div>
-            <div>
-              <div style={{fontSize:20,fontWeight:700,color:"#0F172A",letterSpacing:"-0.02em",lineHeight:1.2}}>{label}</div>
-              {csvNames.length>0&&<div style={{fontSize:11,color:"#94A3B8",marginTop:3}}>{csvNames.join(" + ")}</div>}
+            {csvNames.length>0&&<div style={{fontSize:11,color:"#CBD5E1",marginLeft:20}}>{csvNames.join(" + ")}</div>}
+          </div>
+          <button onClick={onClose} style={{border:"none",background:"#F1F5F9",borderRadius:8,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+            <X size={16} color="#64748B"/>
+          </button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:1,background:"#F1F5F9"}}>
+          {[
+            {label:"Start MUSP",value:fmt(firstVal),sub:fmtMonth(months[dateRange[0]])},
+            {label:"Last MUSP",value:fmt(lastVal),sub:fmtMonth(months[Math.min(dateRange[1],months.length-1)])},
+            {label:"Period Δ",value:(delta>0?"+":"")+delta,sub:pct!==null?`${pct>0?"+":""}${pct.toFixed(0)}%`:"—",color},
+            {label:"Avg/month",value:(avgMonthly>0?"+":"")+avgMonthly.toFixed(1),sub:"monthly avg",color:avgMonthly>0?"#10B981":avgMonthly<0?"#EF4444":"#94A3B8"},
+          ].map(s=>(
+            <div key={s.label} style={{padding:"16px 18px",background:"#fff"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>{s.label}</div>
+              <div style={{fontSize:22,fontWeight:700,color:s.color||"#0F172A",letterSpacing:"-0.02em"}}>{s.value}</div>
+              <div style={{fontSize:10,color:"#94A3B8",marginTop:4}}>{s.sub}</div>
             </div>
-          </div>
-
-          {/* 4 stat tiles */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:24}}>
-            {[
-              {label:"Start",value:fmt(filteredVals.firstVal),sub:fmtMonth(months[dateRange[0]]),c:"#0F172A"},
-              {label:"Last",value:fmt(filteredVals.lastVal),sub:fmtMonth(months[Math.min(dateRange[1],months.length-1)]),c:"#0F172A"},
-              {label:"Period Δ",value:(filteredVals.delta>0?"+":"")+filteredVals.delta,sub:filteredVals.pct!==null?`${filteredVals.pct>0?"+":""}${filteredVals.pct.toFixed(1)}%`:"—",c:dispColor},
-              {label:"Avg / month",value:(filteredVals.avgMonthly>0?"+":"")+filteredVals.avgMonthly.toFixed(1),sub:"monthly average",c:filteredVals.avgMonthly>0?"#10B981":filteredVals.avgMonthly<0?"#EF4444":"#94A3B8"},
-            ].map(s=>(
-              <div key={s.label} style={{
-                padding:"14px 16px",borderRadius:14,
-                background:s.c===color?accentBg:"#F8FAFC",
-                border:"1px solid",
-                borderColor:s.c===color?color+"33":"#F1F5F9"
-              }}>
-                <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>{s.label}</div>
-                <div style={{fontSize:28,fontWeight:700,color:s.c,letterSpacing:"-0.03em",lineHeight:1}}>{s.value}</div>
-                <div style={{fontSize:10,color:"#94A3B8",marginTop:5}}>{s.sub}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Treatment breakdown — clickable to filter chart */}
-          <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:12}}>
-            Treatment breakdown — {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}
-            {activeTreat&&<span onClick={()=>setActiveTreat(null)} style={{marginLeft:8,cursor:"pointer",color:"#3B82F6",fontWeight:700,fontSize:10}}>✕ Clear</span>}
+          ))}
+        </div>
+        <div style={{padding:"20px 28px 0"}}>
+          <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>MUSP over period — hover for details</div>
+          <LineChart history={history} color={color} height={140}/>
+        </div>
+        <div style={{padding:"4px 28px 28px"}}>
+          <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",margin:"16px 0 12px"}}>
+            Breakdown by treatment — {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}
           </div>
           {Object.keys(breakdown).length===0?(
             <div style={{fontSize:12,color:"#CBD5E1"}}>No activity for this period</div>
           ):(
             Object.entries(breakdown).sort((a,b)=>b[1]-a[1]).map(([t,v])=>{
               const maxB=Math.max(...Object.values(breakdown),1);
-              const isActive=activeTreat===t;
               return(
-                <div key={t} style={{marginBottom:10,cursor:"pointer",opacity:activeTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
-                  onClick={()=>setActiveTreat(prev=>prev===t?null:t)}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,alignItems:"center"}}>
-                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8",display:"flex",alignItems:"center",gap:6}}>
-                      {isActive&&<span style={{fontSize:9,background:T_COLORS[t]||"#3B82F6",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>ACTIVE</span>}
-                      {t}
-                    </span>
+                <div key={t} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8"}}>{t}</span>
                     <span style={{fontSize:12,fontWeight:700,color:"#334155"}}>{v}</span>
                   </div>
-                  <div style={{height:7,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
-                    <div style={{width:`${(v/maxB)*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,transition:"width 0.5s",
-                      boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:""}}/>
+                  <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
+                    <div style={{width:`${(v/maxB)*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,transition:"width 0.4s"}}/>
                   </div>
                 </div>
               );
             })
           )}
-        </div>
-
-        {/* ── RIGHT COLUMN — chart ── */}
-        <div style={{padding:"32px 32px 32px 28px",display:"flex",flexDirection:"column",justifyContent:"center",gap:16}}>
-          <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em"}}>
-            {activeTreat?`${activeTreat} — MUSP over period`:"MUSP over period"} — hover for details
-          </div>
-          <LineChart history={chartHistory} color={treatColor} height={240}/>
-          {/* Period label */}
-          <div style={{padding:"10px 16px",background:"#F8FAFC",borderRadius:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:11,color:"#94A3B8"}}>Period</span>
-            <span style={{fontSize:12,fontWeight:600,color:"#3B82F6"}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</span>
-          </div>
         </div>
       </div>
     </>
@@ -452,110 +324,40 @@ const Logo=()=>(
   </svg>
 );
 
-// ─── Parse MEMBERS sheet ──────────────────────────────────────────────────────
-// ─── SPA Members fallback (used if MEMBERS sheet fails to load) ───────────────
-const SPA_MEMBERS = [
-  { label: "Seerone Anandarajah (Evolve)",        csvNames: ["Seerone from Evolve Orthodontics"] },
-  { label: "Seerone Anandarajah (Straight Smile)", csvNames: ["Seerone Anandarajah"] },
-  { label: "Laura Duncan",                         csvNames: ["Laura Duncan"] },
-  { label: "Wayne Chen",                           csvNames: ["Wayne Chen"] },
-  { label: "Chris Orloff",                         csvNames: ["Chris Orloff"] },
-  { label: "Theo Baisi",                           csvNames: ["The Ortho Practice"] },
-  { label: "Zak Sullivan",                         csvNames: ["Ocean Orthodontics","Ocean Orthodontics (old)"] },
-  { label: "Shabier Shaboodien",                   csvNames: ["Shabier Shaboodien"] },
-  { label: "Yann Taddei",                          csvNames: ["@ Darwin Orthodontics"] },
-  { label: "Amanda Lawrence",                      csvNames: ["Amanda Lawrence"] },
-  { label: "Reuben How",                           csvNames: ["Reuben How"] },
-  { label: "Lasni Kumarasinghe",                   csvNames: ["MySmile Orthodontics"] },
-  { label: "David Bachmayer",                      csvNames: ["Bachmayer Orthodontics"] },
-  { label: "Helen Moon",      csvNames: [] },
-  { label: "Peter Wilkinson", csvNames: [] },
-  { label: "Jeff Lipshatz",   csvNames: [] },
-  { label: "Hashmat Popat",   csvNames: [] },
-  { label: "Bruce Baker",     csvNames: [] },
-  { label: "Crofton Daniels", csvNames: [] },
-  { label: "Julian Todres",   csvNames: [] },
-  { label: "Peter Munt",      csvNames: [] },
-];
-
-function parseMembers(text){
-  try{
-    const rows=parseCSV(text);
-    if(!rows||rows.length===0)return null;
-    // Find the right column keys (case-insensitive)
-    const sampleKeys=Object.keys(rows[0]);
-    const labelKey=sampleKeys.find(k=>k.toLowerCase().includes("label"))||sampleKeys[0];
-    const csvKey=sampleKeys.find(k=>k.toLowerCase().includes("csv"))||sampleKeys[1];
-    return rows
-      .filter(r=>(r[labelKey]||"").trim().length>0)
-      .map(r=>{
-        const label=(r[labelKey]||"").trim();
-        const csvNamesRaw=(r[csvKey]||"").trim();
-        const csvNames=csvNamesRaw
-          ? csvNamesRaw.split(",").map(s=>s.trim().replace(/^'/,"")).filter(Boolean)
-          : [];
-        return{label,csvNames};
-      });
-  }catch(e){
-    console.error("parseMembers error",e);
-    return null;
-  }
-}
-
-// ─── Google Sheets config ─────────────────────────────────────────────────────
-const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
-const sheetUrl = (tab) =>
-  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(tab)}&cachebust=${Date.now()}`;
-
 // ─── Footer ───────────────────────────────────────────────────────────────────
 const Footer=()=>(
-  <div style={{
-    padding:"16px 32px",
-    borderTop:"1px solid #E2E8F0",
-    display:"flex",justifyContent:"space-between",alignItems:"center",
-    maxWidth:1400,margin:"24px auto 0",
-  }}>
-    <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500,letterSpacing:"0.03em"}}>SPA Growth Monitor — v4.0</span>
+  <div style={{padding:"16px 32px",borderTop:"1px solid #E2E8F0",display:"flex",justifyContent:"space-between",alignItems:"center",maxWidth:1400,margin:"24px auto 0"}}>
+    <span style={{fontSize:11,color:"#CBD5E1",fontWeight:500}}>SPA Growth Monitor — v4.0</span>
     <span style={{fontSize:11,color:"#CBD5E1"}}>Made with 🤙 by Antoine Heritier</span>
   </div>
 );
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
-  const [members,setMembers]=useState(SPA_MEMBERS);
+  const [members,setMembers]=useState(SPA_MEMBERS_FALLBACK);
   const [loadStatus,setLoadStatus]=useState("loading");
+  const [lastRefresh,setLastRefresh]=useState(null);
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
   const [dateRange,setRange]=useState([0,1]);
   const [sortBy,setSortBy]=useState("delta");
-  const [activeTab,setActiveTab]=useState("overview");
+  const [activeTab,setActiveTab]=useState("doctors");
   const [filterMode,setFilter]=useState("all");
   const [activeDoctor,setActiveDoctor]=useState(null);
-  const [overviewTreat,setOverviewTreat]=useState(null);
-  const [csvError,setCsvError]=useState(null);
-  const [lastRefresh,setLastRefresh]=useState(null);
 
-  // Load both DATA and MEMBERS tabs in parallel
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
-    setCsvError(null);
-    // DATA is required. MEMBERS is optional — falls back to SPA_MEMBERS.
-    const dataFetch=fetch(sheetUrl("DATA"))
-      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
-      .catch(()=>fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`)
-        .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();}));
-    const membersFetch=fetch(sheetUrl("MEMBERS"))
-      .then(r=>r.ok?r.text():null)
-      .catch(()=>null);
-
+    const dataFetch=fetch(sheetUrl("DATA")).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
+    const membersFetch=fetch(sheetUrl("MEMBERS")).then(r=>r.ok?r.text():null).catch(()=>null);
     Promise.all([dataFetch,membersFetch])
       .then(([dataText,membersText])=>{
         const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
         setRawData(parsed);
         if(membersText){
-          const parsedMembers=parseMembers(membersText);
-          if(parsedMembers&&parsedMembers.length>0)setMembers(parsedMembers);
-          // else keep SPA_MEMBERS already set as default
+          const pm=parseMembers(membersText);
+          if(pm&&pm.length>0)setMembers(pm);
         }
         setLastRefresh(new Date());
         setLoadStatus("ok");
@@ -565,23 +367,14 @@ export default function Dashboard(){
 
   useEffect(()=>{loadFromSheets();},[loadFromSheets]);
 
-  // Manual CSV override (kept as fallback)
   const handleFile=useCallback(file=>{
     if(!file)return;
-    setCsvError(null);
     const reader=new FileReader();
     reader.onload=e=>{
       try{
         const parsed=parseCSV(e.target.result);
-        if(!parsed||parsed.length===0){setCsvError("File is empty.");return;}
-        const sample=parsed[0];const keys=Object.keys(sample);
-        if(keys.length<9){setCsvError(`Invalid format — ${keys.length} columns detected.`);return;}
-        const dateVal=(sample[keys[6]]||"").substring(0,7);
-        if(!/^\d{4}-\d{2}$/.test(dateVal)){setCsvError(`Invalid Date column : "${sample[keys[6]]||"vide"}".`);return;}
-        const muspVal=sample[keys[8]];
-        if(isNaN(parseInt(muspVal))){setCsvError(`Non-numeric MUSP column : "${muspVal??'vide'}".`);return;}
-        setRawData(parsed);setLoadStatus("ok");setLastRefresh(new Date());
-      }catch{setCsvError("Unable to read CSV file.");}
+        if(parsed&&parsed.length>0){setRawData(parsed);setLoadStatus("ok");setLastRefresh(new Date());}
+      }catch(err){console.error(err);}
     };
     reader.readAsText(file);
   },[]);
@@ -592,77 +385,60 @@ export default function Dashboard(){
     if(f?.name.endsWith(".csv"))handleFile(f);
   },[handleFile]);
 
-  const{months,stats,treatSummary,totals,globalHistory,filteredStats,filteredTotals,filteredGlobalHistory,allRows}=useMemo(()=>{
-    if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:[]};
+  const{months,stats,treatSummary,totals,globalHistory}=useMemo(()=>{
+    if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[]};
     const rows=rawData.map(r=>{const k=Object.keys(r);return{doctor:(r[k[5]]||"").trim().replace(/^'/,""),date:(r[k[6]]||"").substring(0,7),treat:(r[k[7]]||"").trim(),musp:parseInt(r[k[8]])||0};}).filter(r=>r.date&&r.doctor);
     const allMonths=[...new Set(rows.map(r=>r.date))].sort();
-    if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:rows};
+    if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[]};
     const si=Math.min(dateRange[0],allMonths.length-1);
     const ei=Math.min(Math.max(dateRange[1],si+1),allMonths.length-1);
     const selMonths=allMonths.slice(si,ei+1);
     const firstM=allMonths[si],lastM=allMonths[ei];
+    const tRows=treatment==="All"?rows:rows.filter(r=>r.treat===treatment);
     const allCsvNames=new Set(members.flatMap(m=>m.csvNames));
 
-    // Helper: build stats for a given row filter
-    const buildStats=(rowFilter)=>{
-      const tRows=rowFilter?rows.filter(rowFilter):rows;
-      const memberStats=members.map(member=>{
-        const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
-        const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
-        const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
-        const delta=lastVal-firstVal;
-        const pct=firstVal>0?(lastVal-firstVal)/firstVal*100:null;
-        const isNewEntry=firstVal===0&&lastVal>0;
-        const histVals=selMonths.map(m=>monthMap[m]||0);
-        const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
-        const avgMonthly=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
-        const breakdown={};myRows.filter(r=>r.date===lastM).forEach(r=>{breakdown[r.treat]=(breakdown[r.treat]||0)+r.musp;});
-        const history=selMonths.map(m=>({month:m,value:monthMap[m]||0}));
-        return{...member,lastVal,firstVal,delta,pct,isNewEntry,avgMonthly,breakdown,history};
-      });
-      const sorted=[...memberStats].sort((a,b)=>{
-        if(sortBy==="delta")return(b.delta??-Infinity)-(a.delta??-Infinity);
-        if(sortBy==="volume")return b.lastVal-a.lastVal;
-        return 0;
-      });
-      const globalMap={};
-      tRows.filter(r=>allCsvNames.has(r.doctor)).forEach(r=>{globalMap[r.date]=(globalMap[r.date]||0)+r.musp;});
-      const gHistory=selMonths.map(m=>({month:m,value:globalMap[m]||0}));
-      const totalFirst=sorted.reduce((s,d)=>s+d.firstVal,0);
-      const totalLast=sorted.reduce((s,d)=>s+d.lastVal,0);
-      const totalDelta=totalLast-totalFirst;
-      const totalPct=totalFirst>0?totalDelta/totalFirst*100:null;
-      const tots={totalMUSP:totalLast,totalFirst,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0||d.isNewEntry).length,declining:sorted.filter(d=>d.delta<0).length};
-      return{sorted,gHistory,tots};
-    };
+    const stats=members.map(member=>{
+      const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
+      const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
+      const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
+      const delta=lastVal-firstVal,pct=firstVal>0?(lastVal-firstVal)/firstVal*100:null;
+      const histVals=selMonths.map(m=>monthMap[m]||0);
+      const monthlyDeltas=histVals.slice(1).map((v,i)=>v-histVals[i]);
+      const avgMonthly=monthlyDeltas.length>0?monthlyDeltas.reduce((a,b)=>a+b,0)/monthlyDeltas.length:0;
+      const breakdown={};myRows.filter(r=>r.date===lastM).forEach(r=>{breakdown[r.treat]=(breakdown[r.treat]||0)+r.musp;});
+      const history=selMonths.map(m=>({month:m,value:monthMap[m]||0}));
+      return{...member,lastVal,firstVal,delta,pct,avgMonthly,breakdown,history};
+    });
 
-    // Base filter: global treatment pill filter
-    const baseFilter=treatment==="All"?null:r=>r.treat===treatment;
+    const sorted=[...stats].sort((a,b)=>{
+      if(sortBy==="delta")return(b.delta??-Infinity)-(a.delta??-Infinity);
+      if(sortBy==="volume")return b.lastVal-a.lastVal;
+      if(sortBy==="name")return a.label.localeCompare(b.label);
+      return 0;
+    });
 
-    // Stats for the doctors tab (uses global treatment filter)
-    const{sorted:stats,gHistory:globalHistory,tots:totals}=buildStats(baseFilter);
+    const globalMap={};
+    tRows.filter(r=>allCsvNames.has(r.doctor)).forEach(r=>{globalMap[r.date]=(globalMap[r.date]||0)+r.musp;});
+    const globalHistory=selMonths.map(m=>({month:m,value:globalMap[m]||0}));
 
-    // Stats filtered by overviewTreat (for overview tab KPIs)
-    const overviewFilter=overviewTreat
-      ? (treatment==="All"?r=>r.treat===overviewTreat:r=>r.treat===treatment&&r.treat===overviewTreat)
-      : baseFilter;
-    const{sorted:filteredStats,gHistory:filteredGlobalHistory,tots:filteredTotals}=buildStats(overviewFilter);
-
-    // Treatment summary (always based on base filter)
     const treatMap={};
-    (baseFilter?rows.filter(baseFilter):rows).filter(r=>selMonths.includes(r.date)&&allCsvNames.has(r.doctor))
-      .forEach(r=>{treatMap[r.treat]=(treatMap[r.treat]||0)+r.musp;});
+    tRows.filter(r=>selMonths.includes(r.date)&&allCsvNames.has(r.doctor)).forEach(r=>{treatMap[r.treat]=(treatMap[r.treat]||0)+r.musp;});
     const tTotal=Object.values(treatMap).reduce((s,v)=>s+v,0);
     const treatSummary=Object.entries(treatMap).map(([t,v])=>({t,v,pct:tTotal>0?v/tTotal:0})).sort((a,b)=>b.v-a.v);
 
-    return{months:allMonths,stats,treatSummary,globalHistory,totals,filteredStats,filteredTotals,filteredGlobalHistory,allRows:rows};
-  },[rawData,dateRange,treatment,sortBy,overviewTreat,members]);
+    const totalFirst=sorted.reduce((s,d)=>s+d.firstVal,0);
+    const totalLast=sorted.reduce((s,d)=>s+d.lastVal,0);
+    const totalDelta=totalLast-totalFirst;
+    const totalPct=totalFirst>0?totalDelta/totalFirst*100:null;
+
+    return{months:allMonths,stats:sorted,treatSummary,globalHistory,totals:{totalMUSP:totalLast,totalFirst,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0).length,declining:sorted.filter(d=>d.delta<0).length}};
+  },[rawData,dateRange,treatment,sortBy,members]);
 
   useEffect(()=>{if(months.length>1)setRange([0,months.length-1]);},[months.length]);
 
   const handleKpiClick=mode=>{setFilter(f=>f===mode?"all":mode);setActiveTab("doctors");};
   const visibleStats=useMemo(()=>{
-    if(filterMode==="growing")return stats.filter(d=>d.delta>0||d.isNewEntry);
+    if(filterMode==="growing")return stats.filter(d=>d.delta>0);
     if(filterMode==="declining")return stats.filter(d=>d.delta<0);
     return stats;
   },[stats,filterMode]);
@@ -677,8 +453,8 @@ export default function Dashboard(){
     </div>
   );
 
-  // Loading / error screen
-  if(loadStatus==="loading"||(!rawData&&loadStatus!=="error")) return(
+  // Loading screen
+  if(loadStatus==="loading"&&!rawData) return(
     <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#F8FAFC",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0;}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center"}}><Logo/></div>
@@ -690,30 +466,24 @@ export default function Dashboard(){
     </div>
   );
 
+  // Error screen
   if(loadStatus==="error"&&!rawData) return(
     <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#F8FAFC",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0;}.upload-zone{border:2px dashed #CBD5E1;border-radius:20px;padding:64px 40px;text-align:center;cursor:pointer;transition:all 0.2s;background:#fff;}.upload-zone:hover,.upload-zone.drag{border-color:#3B82F6;background:#EFF6FF;}`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0;}.upload-zone{border:2px dashed #CBD5E1;border-radius:20px;padding:40px;text-align:center;cursor:pointer;transition:all 0.2s;background:#fff;}.upload-zone:hover{border-color:#3B82F6;background:#EFF6FF;}`}</style>
       <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <Logo/>
-        <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
-          ↻ Retry
-        </button>
+        <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>↻ Retry</button>
       </div>
-      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:24,padding:40}}>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:20,padding:40}}>
         <div style={{fontSize:40}}>⚠️</div>
-        <div style={{textAlign:"center"}}>
-          <div style={{fontSize:18,fontWeight:700,color:"#0F172A",marginBottom:8}}>Unable to load data</div>
-          <div style={{fontSize:13,color:"#94A3B8",marginBottom:24}}>Make sure the Google Sheet is shared publicly (Viewer access).</div>
-          <button onClick={loadFromSheets} style={{padding:"10px 24px",background:"#3B82F6",color:"#fff",border:"none",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:24}}>↻ Retry</button>
-        </div>
-        <div style={{fontSize:12,color:"#CBD5E1",marginBottom:8}}>or load a CSV file manually</div>
+        <div style={{fontSize:18,fontWeight:700,color:"#0F172A"}}>Unable to load data</div>
+        <div style={{fontSize:13,color:"#94A3B8",textAlign:"center"}}>Make sure the Google Sheet is shared publicly (Viewer access).</div>
+        <button onClick={loadFromSheets} style={{padding:"10px 24px",background:"#3B82F6",color:"#fff",border:"none",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer"}}>↻ Retry</button>
+        <div style={{fontSize:12,color:"#CBD5E1"}}>or load a CSV file manually</div>
         <label style={{cursor:"pointer",width:"100%",maxWidth:400}}>
           <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
-          <div className={`upload-zone ${isDragging?"drag":""}`} onDragOver={e=>{e.preventDefault();setIsDrag(true);}} onDragLeave={()=>setIsDrag(false)} onDrop={onDrop}>
-            <div style={{fontSize:14,fontWeight:600,color:"#64748B"}}>📂 Drop a CSV here</div>
-          </div>
+          <div className="upload-zone">📂 Drop a CSV here</div>
         </label>
-        {csvError&&<div style={{fontSize:12,color:"#EF4444",maxWidth:400,textAlign:"center"}}>{csvError}</div>}
       </div>
       <Footer/>
     </div>
@@ -739,8 +509,7 @@ export default function Dashboard(){
         .avg-chip{display:inline-flex;align-items:center;padding:2px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-top:3px;}
       `}</style>
 
-      {/* Doctor modal */}
-      {activeDoctor&&<DoctorModal doctor={activeDoctor} onClose={()=>setActiveDoctor(null)} dateRange={dateRange} months={months} allRows={allRows}/>}
+      {activeDoctor&&<DoctorModal doctor={activeDoctor} onClose={()=>setActiveDoctor(null)} dateRange={dateRange} months={months}/>}
 
       {/* Header */}
       <div style={{background:"linear-gradient(135deg,#1E3A5F,#2563EB)",padding:"0 32px",height:64,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 2px 12px rgba(37,99,235,0.18)"}}>
@@ -753,152 +522,91 @@ export default function Dashboard(){
           </div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          {lastRefresh&&<span style={{fontSize:11,color:"rgba(255,255,255,0.45)"}}>Updated at {lastRefresh.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</span>}
-          <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
-            ↻ Refresh
-          </button>
+          {lastRefresh&&<span style={{fontSize:11,color:"rgba(255,255,255,0.45)"}}>Updated {lastRefresh.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</span>}
+          <button onClick={loadFromSheets} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 16px",background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.25)",borderRadius:10,color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}}>↻ Refresh</button>
           <label style={{cursor:"pointer"}}>
             <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
-            <div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 14px",background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,color:"rgba(255,255,255,0.6)",fontSize:11,fontWeight:500,cursor:"pointer"}}>
+            <div style={{display:"flex",alignItems:"center",gap:5,padding:"8px 12px",background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,color:"rgba(255,255,255,0.6)",fontSize:11,cursor:"pointer"}}>
               <Upload size={11}/> CSV
             </div>
           </label>
         </div>
       </div>
 
-      {/* CSV Error banner */}
-      {csvError&&(
-        <div style={{background:"#FEF2F2",borderBottom:"1px solid #FECACA",padding:"12px 32px",display:"flex",alignItems:"flex-start",gap:12}}>
-          <div style={{fontSize:18,lineHeight:1,flexShrink:0}}>⚠️</div>
-          <div style={{flex:1}}>
-            <div style={{fontSize:13,fontWeight:600,color:"#DC2626",marginBottom:2}}>Invalid file format</div>
-            <div style={{fontSize:12,color:"#EF4444",whiteSpace:"pre-line"}}>{csvError}</div>
-          </div>
-          <button onClick={()=>{setCsvError(null);setFileName(null);}} style={{border:"none",background:"none",cursor:"pointer",color:"#EF4444",fontSize:18,lineHeight:1,padding:"0 4px",flexShrink:0}}>✕</button>
-        </div>
-      )}
-
       <div style={{padding:"24px 32px",maxWidth:1400,margin:"0 auto"}}>
 
-        {/* KPI row — dark hero banner + 3 stat pills */}
-        <div style={{marginBottom:20}}>
-
-          {/* Hero banner */}
-          <div style={{
-            background:"linear-gradient(135deg,#0F172A 0%,#1E3A5F 60%,#2563EB 100%)",
-            borderRadius:20,padding:"28px 36px",marginBottom:12,
-            display:"flex",alignItems:"stretch",gap:0,
-            boxShadow:"0 8px 32px rgba(37,99,235,0.18)"
-          }}>
-            {/* Total */}
-            <div style={{flex:"0 0 auto",paddingRight:40}}>
-              <div style={{fontSize:10,fontWeight:600,color:"rgba(255,255,255,0.4)",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:10}}>Portfolio Total MUSP</div>
-              <div style={{fontSize:52,fontWeight:800,color:"#fff",letterSpacing:"-0.04em",lineHeight:1}}>{fmt(totals.totalMUSP)}</div>
-              <div style={{fontSize:12,color:"rgba(255,255,255,0.35)",marginTop:8,fontWeight:500}}>{fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
-            </div>
-
-            {/* Divider */}
-            <div style={{width:1,background:"rgba(255,255,255,0.1)",margin:"0 40px",flexShrink:0}}/>
-
-            {/* Stats row */}
-            <div style={{flex:1,display:"flex",alignItems:"center",gap:0}}>
-              {[
-                {label:"Period Δ",value:(totals.totalDelta>=0?"+":"")+fmt(totals.totalDelta),color:totals.totalDelta>=0?"#34D399":"#F87171",sub:`${fmt(totals.totalFirst)} → ${fmt(totals.totalMUSP)}`},
-                {label:"Growth",value:totals.totalPct!==null?`${totals.totalPct>=0?"+":""}${totals.totalPct.toFixed(1)}%`:"—",color:totals.totalPct>=0?"#34D399":"#F87171",sub:"over selected period"},
-                {label:"Period",value:null,color:"#94A3B8",sub:null,isDate:true},
-              ].map((s,i)=>(
-                <div key={s.label} style={{flex:1,paddingLeft:i===0?0:32,borderLeft:i>0?"1px solid rgba(255,255,255,0.08)":"",[i>0?"paddingLeft":""]:""}}>
-                  <div style={{fontSize:10,fontWeight:600,color:"rgba(255,255,255,0.4)",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:10}}>{s.label}</div>
-                  {s.isDate?(
-                    <div style={{fontSize:15,fontWeight:600,color:"#fff",lineHeight:1.7}}>
-                      {fmtMonth(months[dateRange[0]])}<br/>
-                      <span style={{color:"rgba(255,255,255,0.3)",fontSize:12}}>→ </span>
-                      {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}
-                    </div>
-                  ):(
-                    <>
-                      <div style={{fontSize:34,fontWeight:700,color:s.color,letterSpacing:"-0.03em",lineHeight:1}}>{s.value}</div>
-                      <div style={{fontSize:11,color:"rgba(255,255,255,0.3)",marginTop:8}}>{s.sub}</div>
-                    </>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 3 stat pills */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-            {[
-              {label:"Doctors tracked",value:members.length,color:"#6366F1",bg:"#EEF2FF",mode:null,badge:"👨‍⚕️",sub:"SPA members"},
-              {label:"Growing",value:totals.growing??0,color:"#10B981",bg:"#ECFDF5",mode:"growing",badge:"↑",sub:"click to filter"},
-              {label:"Declining",value:totals.declining??0,color:"#EF4444",bg:"#FEF2F2",mode:"declining",badge:"↓",sub:"click to filter"},
-            ].map(k=>(
-              <div key={k.label}
-                className={`card kpi-card ${filterMode===k.mode&&k.mode?"active-filter":""}`}
-                style={{
-                  padding:"18px 22px",
-                  display:"flex",alignItems:"center",gap:14,
-                  cursor:k.mode?"pointer":"default",
-                  borderLeft:`3px solid ${k.color}`,
-                  transition:"all 0.15s"
-                }}
-                onClick={()=>k.mode&&handleKpiClick(k.mode)}>
-                <div style={{
-                  width:42,height:42,borderRadius:12,flexShrink:0,
-                  background:k.bg,
-                  display:"flex",alignItems:"center",justifyContent:"center",
-                  fontSize:k.badge.length>1?20:18,fontWeight:700,color:k.color
-                }}>{k.badge}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:2}}>{k.label}</div>
-                  <div style={{fontSize:32,fontWeight:800,color:k.color,letterSpacing:"-0.03em",lineHeight:1}}>{k.value}</div>
-                </div>
-                {k.mode&&filterMode===k.mode&&(
-                  <div style={{fontSize:9,background:k.color,color:"#fff",borderRadius:6,padding:"2px 7px",fontWeight:700,flexShrink:0}}>ACTIVE</div>
-                )}
+        {/* KPI row */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:20}}>
+          <div className="card" style={{padding:"20px 22px",gridColumn:"1/3"}}>
+            <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:12}}>Portfolio Total MUSP</div>
+            <div style={{display:"flex",alignItems:"flex-end",gap:24,flexWrap:"wrap"}}>
+              <div>
+                <div style={{fontSize:40,fontWeight:700,color:"#0F172A",letterSpacing:"-0.04em",lineHeight:1}}>{fmt(totals.totalMUSP)}</div>
+                <div style={{fontSize:11,color:"#94A3B8",marginTop:5}}>{fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
               </div>
-            ))}
+              <div style={{display:"flex",gap:20,paddingBottom:4}}>
+                <div>
+                  <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Period Δ</div>
+                  <div style={{fontSize:24,fontWeight:700,color:totals.totalDelta>=0?"#10B981":"#EF4444"}}>{totals.totalDelta>=0?"+":""}{fmt(totals.totalDelta)}</div>
+                </div>
+                <div>
+                  <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Growth %</div>
+                  <div style={{fontSize:24,fontWeight:700,color:totals.totalPct>=0?"#10B981":"#EF4444"}}>{totals.totalPct!==null?`${totals.totalPct>=0?"+":""}${totals.totalPct.toFixed(1)}%`:"—"}</div>
+                </div>
+                <div>
+                  <div style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Start</div>
+                  <div style={{fontSize:24,fontWeight:700,color:"#64748B"}}>{fmt(totals.totalFirst)}</div>
+                </div>
+              </div>
+            </div>
           </div>
+          {[
+            {label:"Doctors",value:members.length,sub:"tracked",color:"#6366F1",mode:null},
+            {label:"Growing",value:totals.growing,sub:"click to filter",color:"#10B981",mode:"growing"},
+            {label:"Declining",value:totals.declining,sub:"click to filter",color:"#EF4444",mode:"declining"},
+          ].map(k=>(
+            <div key={k.label} className={`card kpi-card ${filterMode===k.mode&&k.mode?"active-filter":""}`}
+              style={{padding:"20px 22px",color:k.color}}
+              onClick={()=>k.mode&&handleKpiClick(k.mode)}>
+              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:10}}>{k.label}</div>
+              <div style={{fontSize:36,fontWeight:700,letterSpacing:"-0.03em",lineHeight:1}}>{k.value}</div>
+              <div style={{fontSize:11,color:"#94A3B8",marginTop:6}}>{k.sub}</div>
+            </div>
+          ))}
         </div>
 
         {/* Tabs */}
         <div style={{display:"flex",borderBottom:"1px solid #E2E8F0",marginBottom:16,background:"#fff",borderRadius:"16px 16px 0 0",padding:"0 8px"}}>
-          <button className={`tab-btn ${activeTab==="overview"?"active":""}`} onClick={()=>setActiveTab("overview")}>
-            <Globe size={14}/> Portfolio Overview
-          </button>
           <button className={`tab-btn ${activeTab==="doctors"?"active":""}`} onClick={()=>setActiveTab("doctors")}>
             <List size={14}/> Doctors
             {filterMode!=="all"&&<span style={{fontSize:10,background:"#EFF6FF",color:"#3B82F6",borderRadius:10,padding:"1px 7px",fontWeight:700}}>{filterMode}</span>}
+          </button>
+          <button className={`tab-btn ${activeTab==="overview"?"active":""}`} onClick={()=>setActiveTab("overview")}>
+            <Globe size={14}/> Portfolio Overview
           </button>
         </div>
 
         {/* ── DOCTORS TAB ── */}
         {activeTab==="doctors"&&(
           <div style={{display:"grid",gridTemplateColumns:"1fr 260px",gap:16,alignItems:"start"}}>
-            <div style={{position:"sticky",top:0}}>
-              {/* Sticky controls — always visible */}
-              <div style={{position:"sticky",top:0,zIndex:20,background:"#F8FAFC",paddingBottom:8}}>
-                {periodSlider}
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-                  <div style={{display:"flex",gap:2,background:"#fff",border:"1px solid #E2E8F0",borderRadius:24,padding:"3px"}}>
-                    {["All",...TREATMENTS].map(t=><button key={t} className={`pill ${treatment===t?"active":""}`} onClick={()=>setTreat(t)}>{t}</button>)}
-                  </div>
-                  <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-                    {[["delta","↑↓ Growth"],["volume","Volume"]].map(([v,l])=><button key={v} className={`sort-btn ${sortBy===v?"active":""}`} onClick={()=>setSortBy(v)}>{l}</button>)}
-                    {filterMode!=="all"&&<button className="sort-btn active" onClick={()=>setFilter("all")} style={{borderColor:"#F59E0B",color:"#F59E0B",background:"#FFFBEB"}}>✕ Clear filter</button>}
-                  </div>
+            <div>
+              {periodSlider}
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+                <div style={{display:"flex",gap:2,background:"#fff",border:"1px solid #E2E8F0",borderRadius:24,padding:"3px"}}>
+                  {["All",...TREATMENTS].map(t=><button key={t} className={`pill ${treatment===t?"active":""}`} onClick={()=>setTreat(t)}>{t}</button>)}
+                </div>
+                <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+                  {[["delta","↑↓ Growth"],["volume","Volume"]].map(([v,l])=><button key={v} className={`sort-btn ${sortBy===v?"active":""}`} onClick={()=>setSortBy(v)}>{l}</button>)}
+                  {filterMode!=="all"&&<button className="sort-btn active" onClick={()=>setFilter("all")} style={{borderColor:"#F59E0B",color:"#F59E0B",background:"#FFFBEB"}}>✕ Clear filter</button>}
                 </div>
               </div>
-
-              {/* Scrollable doctor table */}
               <div className="card" style={{overflow:"hidden"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"10px 20px",borderBottom:"1px solid #F1F5F9",position:"sticky",top:0,background:"#fff",zIndex:10}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"10px 20px",borderBottom:"1px solid #F1F5F9"}}>
                   {["Doctor","First","Last","Period change","Trend"].map((h,i)=><span key={h} style={{fontSize:10,fontWeight:600,color:"#CBD5E1",textTransform:"uppercase",letterSpacing:"0.07em",textAlign:i>0?"right":"left"}}>{h}</span>)}
                 </div>
-                <div style={{overflowY:"auto",maxHeight:"calc(100vh - 340px)"}}>
                 {visibleStats.length===0&&<div style={{padding:"40px",textAlign:"center",color:"#CBD5E1",fontSize:13}}>No doctors match this filter.</div>}
                 {visibleStats.map(d=>{
-                  const isUp=d.delta>0||d.isNewEntry,isDown=d.delta<0;
+                  const isUp=d.delta>0,isDown=d.delta<0;
                   const dot=isUp?"#10B981":isDown?"#EF4444":"#CBD5E1";
                   const dColor=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
                   const avgColor=d.avgMonthly>0?"#10B981":d.avgMonthly<0?"#EF4444":"#94A3B8";
@@ -918,7 +626,6 @@ export default function Dashboard(){
                         <div>
                           <span style={{fontSize:13,fontWeight:700,color:dColor}}>{d.delta>0?"+":""}{d.delta}</span>
                           {d.pct!==null&&<span style={{fontSize:10,color:dColor,opacity:0.65,marginLeft:4}}>({d.pct>0?"+":""}{d.pct.toFixed(0)}%)</span>}
-                          {d.isNewEntry&&<span style={{fontSize:10,background:"#ECFDF5",color:"#10B981",borderRadius:4,padding:"1px 5px",marginLeft:4,fontWeight:600}}>NEW</span>}
                         </div>
                         {Math.abs(d.avgMonthly)>0.1&&(
                           <span className="avg-chip" style={{background:avgColor+"18",color:avgColor}}>
@@ -930,7 +637,6 @@ export default function Dashboard(){
                     </div>
                   );
                 })}
-                </div>{/* end scrollable rows */}
               </div>
             </div>
 
@@ -985,55 +691,42 @@ export default function Dashboard(){
             <div className="card" style={{padding:"20px 24px",gridColumn:"1/-1"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
                 <div>
-                  <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>
-                    Total Portfolio MUSP {overviewTreat&&<span style={{color:T_COLORS[overviewTreat]||"#3B82F6"}}>— {overviewTreat}</span>}
-                  </div>
-                  <div style={{fontSize:28,fontWeight:700,color:"#0F172A"}}>{fmt(filteredTotals.totalMUSP)}</div>
+                  <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>Total Portfolio MUSP</div>
+                  <div style={{fontSize:28,fontWeight:700,color:"#0F172A"}}>{fmt(totals.totalMUSP)}</div>
                 </div>
                 <div style={{textAlign:"right"}}>
                   <div style={{fontSize:11,color:"#94A3B8",marginBottom:2}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
-                  <div style={{fontSize:20,fontWeight:700,color:filteredTotals.totalDelta>=0?"#10B981":"#EF4444"}}>
-                    {filteredTotals.totalDelta>=0?"+":""}{fmt(filteredTotals.totalDelta)} ({filteredTotals.totalPct!==null?`${filteredTotals.totalPct>=0?"+":""}${filteredTotals.totalPct.toFixed(1)}%`:"—"})
+                  <div style={{fontSize:20,fontWeight:700,color:totals.totalDelta>=0?"#10B981":"#EF4444"}}>
+                    {totals.totalDelta>=0?"+":""}{fmt(totals.totalDelta)} ({totals.totalPct!==null?`${totals.totalPct>=0?"+":""}${totals.totalPct.toFixed(1)}%`:"—"})
                   </div>
                 </div>
               </div>
-              <GlobalChart history={filteredGlobalHistory} color={overviewTreat?T_COLORS[overviewTreat]||"#3B82F6":undefined}/>
+              <GlobalChart history={globalHistory}/>
             </div>
             <div className="card" style={{padding:"20px 24px"}}>
-              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                Treatment breakdown
-                {overviewTreat&&<span onClick={()=>setOverviewTreat(null)} style={{cursor:"pointer",color:"#3B82F6",fontSize:10,fontWeight:700}}>✕ Clear</span>}
-              </div>
-              {treatSummary.map(({t,v,pct})=>{
-                const isActive=overviewTreat===t;
-                return(
-                  <div key={t} style={{marginBottom:14,cursor:"pointer",opacity:overviewTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
-                    onClick={()=>setOverviewTreat(prev=>prev===t?null:t)}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
-                      <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8",display:"flex",alignItems:"center",gap:6}}>
-                        {isActive&&<span style={{fontSize:9,background:T_COLORS[t]||"#3B82F6",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>●</span>}
-                        {t}
-                      </span>
-                      <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400}}>({(pct*100).toFixed(0)}%)</span></span>
-                    </div>
-                    <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
-                      <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,
-                        boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:""}}/>
-                    </div>
+              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>Treatment breakdown</div>
+              {treatSummary.map(({t,v,pct})=>(
+                <div key={t} style={{marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                    <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8"}}>{t}</span>
+                    <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400}}>({(pct*100).toFixed(0)}%)</span></span>
                   </div>
-                );
-              })}
+                  <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
+                    <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4}}/>
+                  </div>
+                </div>
+              ))}
             </div>
             <div className="card" style={{padding:"20px 24px"}}>
               <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>All doctors — period change</div>
               <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                {[...filteredStats].sort((a,b)=>b.delta-a.delta).map(d=>{
+                {[...stats].sort((a,b)=>b.delta-a.delta).map(d=>{
                   const isUp=d.delta>0,isDown=d.delta<0;
                   const color=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
-                  const maxAbs=Math.max(...filteredStats.map(s=>Math.abs(s.delta)),1);
+                  const maxAbs=Math.max(...stats.map(s=>Math.abs(s.delta)),1);
                   return(
                     <div key={d.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:"1px solid #F8FAFC",cursor:"pointer"}}
-                      onClick={()=>{setActiveDoctor(d);}}>
+                      onClick={()=>setActiveDoctor(d)}>
                       <span style={{fontSize:11,color:"#334155",width:190,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</span>
                       <div style={{flex:1,height:6,background:"#F1F5F9",borderRadius:3,overflow:"hidden"}}>
                         <div style={{width:`${(Math.abs(d.delta)/maxAbs)*100}%`,height:"100%",background:color,borderRadius:3}}/>
@@ -1047,7 +740,6 @@ export default function Dashboard(){
           </div>
         )}
       </div>
-
       <Footer/>
     </div>
   );
