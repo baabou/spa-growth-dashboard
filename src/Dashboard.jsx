@@ -478,7 +478,30 @@ const Logo=()=>(
 
 // ─── Google Sheets config ─────────────────────────────────────────────────────
 const SHEET_ID = "1SLMfiZ9BbKM4wqRv8t_ZflK2s92vb4JPXR9Fu464FoU";
-const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&cachebust=${Date.now()}`;
+const GID_DATA    = "0";
+const GID_MEMBERS = "1921281076";
+const sheetUrl = (gid) =>
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${gid}&cachebust=${Date.now()}`;
+
+// Parse the MEMBERS sheet (col A = label, col B = csv names comma-separated)
+function parseMembers(text){
+  try{
+    const lines=text.trim().split("\n");
+    return lines.slice(1)                          // skip header row
+      .map(line=>{
+        const vals=[];let inQ=false,cur="";
+        for(const ch of line){if(ch==='"')inQ=!inQ;else if(ch===','&&!inQ){vals.push(cur.trim());cur="";}else cur+=ch;}
+        vals.push(cur.trim());
+        const label=(vals[0]||"").replace(/^'/, "").trim();
+        const csvNames=(vals[1]||"")
+          .split(",")
+          .map(s=>s.replace(/^'/, "").trim())      // strip leading apostrophe (Google Sheets escape)
+          .filter(Boolean);
+        return label ? {label, csvNames} : null;
+      })
+      .filter(Boolean);
+  }catch{return null;}
+}
 
 // ─── Footer ───────────────────────────────────────────────────────────────────
 const Footer=()=>(
@@ -494,11 +517,14 @@ const Footer=()=>(
 );
 export default function Dashboard(){
   const [rawData,setRawData]=useState(null);
+  const [members,setMembers]=useState(SPA_MEMBERS);  // overwritten by MEMBERS sheet if available
   const [loadStatus,setLoadStatus]=useState("loading"); // "loading" | "ok" | "error"
   const [isDragging,setIsDrag]=useState(false);
   const [treatment,setTreat]=useState("All");
   const [dateRange,setRange]=useState([0,1]);
   const [sortBy,setSortBy]=useState("delta");
+  const [sortDir,setSortDir]=useState("desc"); // "asc" | "desc"
+  const [noActivityOpen,setNoActivityOpen]=useState(false);
   const [activeTab,setActiveTab]=useState("overview");
   const [filterMode,setFilter]=useState("all");
   const [activeDoctor,setActiveDoctor]=useState(null);
@@ -510,18 +536,36 @@ export default function Dashboard(){
   const loadFromSheets=useCallback(()=>{
     setLoadStatus("loading");
     setCsvError(null);
-    fetch(SHEET_URL)
-      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();})
-      .then(text=>{
-        const parsed=parseCSV(text);
+    const dataFetch=fetch(sheetUrl(GID_DATA))
+      .then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.text();});
+    const membersFetch=fetch(sheetUrl(GID_MEMBERS))
+      .then(r=>r.ok?r.text():null)
+      .catch(()=>null);  // MEMBERS failing never blocks the dashboard
+    Promise.all([dataFetch,membersFetch])
+      .then(([dataText,membersText])=>{
+        const parsed=parseCSV(dataText);
         if(!parsed||parsed.length===0)throw new Error("empty");
+        // DEBUG — remove after fix
+        console.log("=== DATA first row keys ===", Object.keys(parsed[0]));
+        console.log("=== DATA first row values ===", Object.values(parsed[0]));
+        console.log("=== MEMBERS raw ===", membersText?.substring(0,300));
         setRawData(parsed);
+        if(membersText){
+          // Guard: if MEMBERS fetch returned the DATA sheet instead (sheet param ignored),
+          // the first header will contain "ISP" — in that case ignore and keep fallback
+          const isDataSheet=membersText.trim().startsWith("ISP");
+          if(!isDataSheet){
+            const m=parseMembers(membersText);
+            console.log("=== MEMBERS parsed ===", m);
+            if(m&&m.length>0)setMembers(m);
+          } else {
+            console.log("=== MEMBERS fetch returned DATA sheet — keeping SPA_MEMBERS fallback ===");
+          }
+        }
         setLastRefresh(new Date());
         setLoadStatus("ok");
       })
-      .catch(()=>{
-        setLoadStatus("error");
-      });
+      .catch(()=>setLoadStatus("error"));
   },[]);
 
   useEffect(()=>{loadFromSheets();},[loadFromSheets]);
@@ -555,19 +599,29 @@ export default function Dashboard(){
 
   const{months,stats,treatSummary,totals,globalHistory,filteredStats,filteredTotals,filteredGlobalHistory,allRows}=useMemo(()=>{
     if(!rawData)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:[]};
-    const rows=rawData.map(r=>{const k=Object.keys(r);return{doctor:(r[k[5]]||"").trim(),date:(r[k[6]]||"").substring(0,7),treat:(r[k[7]]||"").trim(),musp:parseInt(r[k[8]])||0};}).filter(r=>r.date&&r.doctor);
+    const rows=rawData.map(r=>{
+      const k=Object.keys(r);
+      // Use header name for doctor — robust against extra columns
+      const doctorKey=k.find(key=>key.toLowerCase().includes("doctor"))||k[5];
+      const dateKey=k.find(key=>!key.trim()&&/\d{4}/.test(r[key]||""))||k[6];
+      const doctor=(r[doctorKey]||"").trim();
+      const date=(r[k[6]]||"").substring(0,7);
+      const treat=(r[k[7]]||"").trim();
+      const musp=parseInt(r[k[8]])||0;
+      return{doctor,date,treat,musp};
+    }).filter(r=>r.date&&r.doctor);
     const allMonths=[...new Set(rows.map(r=>r.date))].sort();
     if(!allMonths.length)return{months:[],stats:[],treatSummary:[],totals:{},globalHistory:[],filteredStats:[],filteredTotals:{},filteredGlobalHistory:[],allRows:rows};
     const si=Math.min(dateRange[0],allMonths.length-1);
     const ei=Math.min(Math.max(dateRange[1],si+1),allMonths.length-1);
     const selMonths=allMonths.slice(si,ei+1);
     const firstM=allMonths[si],lastM=allMonths[ei];
-    const allCsvNames=new Set(SPA_MEMBERS.flatMap(m=>m.csvNames));
+    const allCsvNames=new Set(members.flatMap(m=>m.csvNames));
 
     // Helper: build stats for a given row filter
     const buildStats=(rowFilter)=>{
       const tRows=rowFilter?rows.filter(rowFilter):rows;
-      const memberStats=SPA_MEMBERS.map(member=>{
+      const memberStats=members.map(member=>{
         const myRows=tRows.filter(r=>member.csvNames.includes(r.doctor));
         const monthMap={};myRows.forEach(r=>{monthMap[r.date]=(monthMap[r.date]||0)+r.musp;});
         const lastVal=monthMap[lastM]||0,firstVal=monthMap[firstM]||0;
@@ -582,8 +636,9 @@ export default function Dashboard(){
         return{...member,lastVal,firstVal,delta,pct,isNewEntry,avgMonthly,breakdown,history};
       });
       const sorted=[...memberStats].sort((a,b)=>{
-        if(sortBy==="delta")return(b.delta??-Infinity)-(a.delta??-Infinity);
-        if(sortBy==="volume")return b.lastVal-a.lastVal;
+        const dir=sortDir==="asc"?1:-1;
+        if(sortBy==="delta")return dir*((a.delta??-Infinity)-(b.delta??-Infinity));
+        if(sortBy==="volume")return dir*(a.lastVal-b.lastVal);
         return 0;
       });
       const globalMap={};
@@ -591,9 +646,10 @@ export default function Dashboard(){
       const gHistory=selMonths.map(m=>({month:m,value:globalMap[m]||0}));
       const totalFirst=sorted.reduce((s,d)=>s+d.firstVal,0);
       const totalLast=sorted.reduce((s,d)=>s+d.lastVal,0);
+      const totalSum=sorted.reduce((s,d)=>s+d.history.reduce((a,h)=>a+h.value,0),0);
       const totalDelta=totalLast-totalFirst;
       const totalPct=totalFirst>0?totalDelta/totalFirst*100:null;
-      const tots={totalMUSP:totalLast,totalFirst,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0||d.isNewEntry).length,declining:sorted.filter(d=>d.delta<0).length};
+      const tots={totalMUSP:totalSum,totalFirst,totalLast,totalDelta,totalPct,growing:sorted.filter(d=>d.delta>0||d.isNewEntry).length,declining:sorted.filter(d=>d.delta<0).length};
       return{sorted,gHistory,tots};
     };
 
@@ -617,7 +673,7 @@ export default function Dashboard(){
     const treatSummary=Object.entries(treatMap).map(([t,v])=>({t,v,pct:tTotal>0?v/tTotal:0})).sort((a,b)=>b.v-a.v);
 
     return{months:allMonths,stats,treatSummary,globalHistory,totals,filteredStats,filteredTotals,filteredGlobalHistory,allRows:rows};
-  },[rawData,dateRange,treatment,sortBy,overviewTreat]);
+  },[rawData,dateRange,treatment,sortBy,sortDir,overviewTreat,members]);
 
   useEffect(()=>{if(months.length>1)setRange([0,months.length-1]);},[months.length]);
 
@@ -755,7 +811,7 @@ export default function Dashboard(){
             <div style={{flex:"0 0 auto",paddingRight:40}}>
               <div style={{fontSize:10,fontWeight:600,color:"rgba(255,255,255,0.4)",textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:10}}>Portfolio Total MUSP</div>
               <div style={{fontSize:52,fontWeight:800,color:"#fff",letterSpacing:"-0.04em",lineHeight:1}}>{fmt(totals.totalMUSP)}</div>
-              <div style={{fontSize:12,color:"rgba(255,255,255,0.35)",marginTop:8,fontWeight:500}}>{fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
+              <div style={{fontSize:12,color:"rgba(255,255,255,0.35)",marginTop:8,fontWeight:500}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
             </div>
 
             {/* Divider */}
@@ -764,7 +820,7 @@ export default function Dashboard(){
             {/* Stats row */}
             <div style={{flex:1,display:"flex",alignItems:"center",gap:0}}>
               {[
-                {label:"Period Δ",value:(totals.totalDelta>=0?"+":"")+fmt(totals.totalDelta),color:totals.totalDelta>=0?"#34D399":"#F87171",sub:`${fmt(totals.totalFirst)} → ${fmt(totals.totalMUSP)}`},
+                {label:"Period Δ",value:(totals.totalDelta>=0?"+":"")+fmt(totals.totalDelta),color:totals.totalDelta>=0?"#34D399":"#F87171",sub:`${fmt(totals.totalFirst)} → ${fmt(totals.totalLast)}`},
                 {label:"Growth",value:totals.totalPct!==null?`${totals.totalPct>=0?"+":""}${totals.totalPct.toFixed(1)}%`:"—",color:totals.totalPct>=0?"#34D399":"#F87171",sub:"over selected period"},
                 {label:"Period",value:null,color:"#94A3B8",sub:null,isDate:true},
               ].map((s,i)=>(
@@ -790,7 +846,7 @@ export default function Dashboard(){
           {/* 3 stat pills */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
             {[
-              {label:"Doctors tracked",value:SPA_MEMBERS.length,color:"#6366F1",bg:"#EEF2FF",mode:null,badge:"👨‍⚕️",sub:"SPA members"},
+              {label:"Doctors tracked",value:stats.filter(d=>!(d.firstVal===0&&d.lastVal===0)).length,color:"#6366F1",bg:"#EEF2FF",mode:null,badge:"👨‍⚕️",sub:"with activity"},
               {label:"Growing",value:totals.growing??0,color:"#10B981",bg:"#ECFDF5",mode:"growing",badge:"↑",sub:"click to filter"},
               {label:"Declining",value:totals.declining??0,color:"#EF4444",bg:"#FEF2F2",mode:"declining",badge:"↓",sub:"click to filter"},
             ].map(k=>(
@@ -835,132 +891,196 @@ export default function Dashboard(){
 
         {/* ── DOCTORS TAB ── */}
         {activeTab==="doctors"&&(
-          <div style={{display:"grid",gridTemplateColumns:"1fr 260px",gap:16,alignItems:"start"}}>
-            <div style={{position:"sticky",top:0}}>
-              {/* Sticky controls — always visible */}
-              <div style={{position:"sticky",top:0,zIndex:20,background:"#F8FAFC",paddingBottom:8}}>
-                {periodSlider}
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-                  <div style={{display:"flex",gap:2,background:"#fff",border:"1px solid #E2E8F0",borderRadius:24,padding:"3px"}}>
-                    {["All",...TREATMENTS].map(t=><button key={t} className={`pill ${treatment===t?"active":""}`} onClick={()=>setTreat(t)}>{t}</button>)}
-                  </div>
-                  <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-                    {[["delta","↑↓ Growth"],["volume","Volume"]].map(([v,l])=><button key={v} className={`sort-btn ${sortBy===v?"active":""}`} onClick={()=>setSortBy(v)}>{l}</button>)}
-                    {filterMode!=="all"&&<button className="sort-btn active" onClick={()=>setFilter("all")} style={{borderColor:"#F59E0B",color:"#F59E0B",background:"#FFFBEB"}}>✕ Clear filter</button>}
-                  </div>
+          <div>
+            {/* Sticky controls */}
+            <div style={{position:"sticky",top:0,zIndex:20,background:"#F8FAFC",paddingBottom:8}}>
+              {periodSlider}
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                <div style={{display:"flex",gap:2,background:"#fff",border:"1px solid #E2E8F0",borderRadius:24,padding:"3px"}}>
+                  {["All",...TREATMENTS].map(t=><button key={t} className={`pill ${treatment===t?"active":""}`} onClick={()=>setTreat(t)}>{t}</button>)}
                 </div>
-              </div>
-
-              {/* Scrollable doctor table */}
-              <div className="card" style={{overflow:"hidden"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"10px 20px",borderBottom:"1px solid #F1F5F9",position:"sticky",top:0,background:"#fff",zIndex:10}}>
-                  {["Doctor","First","Last","Period change","Trend"].map((h,i)=><span key={h} style={{fontSize:10,fontWeight:600,color:"#CBD5E1",textTransform:"uppercase",letterSpacing:"0.07em",textAlign:i>0?"right":"left"}}>{h}</span>)}
+                <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+                  {[["delta","↑↓ Growth"],["volume","Volume"]].map(([v,l])=>(
+                    <button key={v} className={`sort-btn ${sortBy===v?"active":""}`}
+                      onClick={()=>{
+                        if(sortBy===v) setSortDir(d=>d==="desc"?"asc":"desc");
+                        else{setSortBy(v);setSortDir("desc");}
+                      }}>
+                      {l} {sortBy===v?(sortDir==="desc"?"↓":"↑"):""}
+                    </button>
+                  ))}
+                  {filterMode!=="all"&&<button className="sort-btn active" onClick={()=>setFilter("all")} style={{borderColor:"#F59E0B",color:"#F59E0B",background:"#FFFBEB"}}>✕ Clear filter</button>}
                 </div>
-                <div style={{overflowY:"auto",maxHeight:"calc(100vh - 340px)"}}>
-                {visibleStats.length===0&&<div style={{padding:"40px",textAlign:"center",color:"#CBD5E1",fontSize:13}}>No doctors match this filter.</div>}
-                {visibleStats.map(d=>{
-                  const isUp=d.delta>0||d.isNewEntry,isDown=d.delta<0;
-                  const dot=isUp?"#10B981":isDown?"#EF4444":"#CBD5E1";
-                  const dColor=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
-                  const avgColor=d.avgMonthly>0?"#10B981":d.avgMonthly<0?"#EF4444":"#94A3B8";
-                  return(
-                    <div key={d.label} className="trow" onClick={()=>setActiveDoctor(d)}
-                      style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"12px 20px",alignItems:"center"}}>
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        <div style={{width:7,height:7,borderRadius:"50%",background:dot,flexShrink:0}}/>
-                        <div>
-                          <div style={{fontSize:13,fontWeight:500,color:"#1E293B"}}>{d.label}</div>
-                          {d.csvNames.length>0&&<div style={{fontSize:10,color:"#CBD5E1",marginTop:1}}>{d.csvNames.join(" + ")}</div>}
-                        </div>
-                      </div>
-                      <span style={{textAlign:"right",fontSize:13,color:"#94A3B8"}}>{fmt(d.firstVal)}</span>
-                      <span style={{textAlign:"right",fontSize:14,fontWeight:700,color:"#0F172A"}}>{fmt(d.lastVal)}</span>
-                      <div style={{textAlign:"right"}}>
-                        <div>
-                          <span style={{fontSize:13,fontWeight:700,color:dColor}}>{d.delta>0?"+":""}{d.delta}</span>
-                          {d.pct!==null&&<span style={{fontSize:10,color:dColor,opacity:0.65,marginLeft:4}}>({d.pct>0?"+":""}{d.pct.toFixed(0)}%)</span>}
-                          {d.isNewEntry&&<span style={{fontSize:10,background:"#ECFDF5",color:"#10B981",borderRadius:4,padding:"1px 5px",marginLeft:4,fontWeight:600}}>NEW</span>}
-                        </div>
-                        {Math.abs(d.avgMonthly)>0.1&&(
-                          <span className="avg-chip" style={{background:avgColor+"18",color:avgColor}}>
-                            avg {d.avgMonthly>0?"+":""}{d.avgMonthly.toFixed(1)}/mo
-                          </span>
-                        )}
-                      </div>
-                      <div style={{display:"flex",justifyContent:"flex-end"}}><Sparkline data={d.history} color={dot}/></div>
-                    </div>
-                  );
-                })}
-                </div>{/* end scrollable rows */}
               </div>
             </div>
 
-            {/* Right sidebar */}
-            <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              <div className="card" style={{padding:"18px 20px"}}>
-                <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:14}}>Treatment breakdown</div>
-                {treatSummary.map(({t,v,pct})=>(
-                  <div key={t} style={{marginBottom:12}}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                      <span style={{fontSize:11,fontWeight:600,color:T_COLORS[t]||"#94A3B8"}}>{t}</span>
-                      <span style={{fontSize:11,color:"#64748B"}}>{v} <span style={{color:"#CBD5E1"}}>({(pct*100).toFixed(0)}%)</span></span>
-                    </div>
-                    <div style={{height:5,background:"#F1F5F9",borderRadius:3,overflow:"hidden"}}>
-                      <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:3}}/>
-                    </div>
-                  </div>
+            {/* Doctor table */}
+            <div className="card" style={{overflow:"hidden"}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"10px 20px",borderBottom:"1px solid #F1F5F9",background:"#fff"}}>
+                {["Doctor","First","Last","Period change","Trend"].map((h,i)=>(
+                  <span key={h} style={{fontSize:10,fontWeight:600,color:"#CBD5E1",textTransform:"uppercase",letterSpacing:"0.07em",textAlign:i>0?"right":"left"}}>{h}</span>
                 ))}
               </div>
-              <div className="card" style={{padding:"18px 20px"}}>
-                <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:12}}>
-                  <TrendingUp size={11} style={{display:"inline",marginRight:5,color:"#10B981"}}/>Top growth
-                </div>
-                {stats.filter(d=>d.delta>0).slice(0,6).map(d=>(
-                  <div key={d.label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #F1F5F9"}}>
-                    <span style={{fontSize:12,color:"#334155",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:155}}>{d.label}</span>
-                    <span className="badge" style={{background:"#ECFDF5",color:"#10B981"}}>+{d.delta}</span>
-                  </div>
-                ))}
-                {stats.filter(d=>d.delta>0).length===0&&<div style={{fontSize:12,color:"#CBD5E1"}}>No growth detected</div>}
-              </div>
-              <div className="card" style={{padding:"18px 20px"}}>
-                <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:12}}>
-                  <TrendingDown size={11} style={{display:"inline",marginRight:5,color:"#EF4444"}}/>Declining
-                </div>
-                {stats.filter(d=>d.delta<0).sort((a,b)=>a.delta-b.delta).slice(0,6).map(d=>(
-                  <div key={d.label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #F1F5F9"}}>
-                    <span style={{fontSize:12,color:"#334155",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:155}}>{d.label}</span>
-                    <span className="badge" style={{background:"#FEF2F2",color:"#EF4444"}}>{d.delta}</span>
-                  </div>
-                ))}
-                {stats.filter(d=>d.delta<0).length===0&&<div style={{fontSize:12,color:"#CBD5E1"}}>No decline detected</div>}
-              </div>
+
+              {/* Active doctors */}
+              {(()=>{
+                const active=visibleStats.filter(d=>!(d.firstVal===0&&d.lastVal===0));
+                const inactive=visibleStats.filter(d=>d.firstVal===0&&d.lastVal===0);
+                return(
+                  <>
+                    {active.length===0&&<div style={{padding:"40px",textAlign:"center",color:"#CBD5E1",fontSize:13}}>No doctors match this filter.</div>}
+                    {active.map(d=>{
+                      const isUp=d.delta>0||d.isNewEntry,isDown=d.delta<0;
+                      const dot=isUp?"#10B981":isDown?"#EF4444":"#CBD5E1";
+                      const dColor=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
+                      const avgColor=d.avgMonthly>0?"#10B981":d.avgMonthly<0?"#EF4444":"#94A3B8";
+                      return(
+                        <div key={d.label} className="trow" onClick={()=>setActiveDoctor(d)}
+                          style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"12px 20px",alignItems:"center"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{width:7,height:7,borderRadius:"50%",background:dot,flexShrink:0}}/>
+                            <div style={{fontSize:13,fontWeight:500,color:"#1E293B"}}>{d.label}</div>
+                          </div>
+                          <span style={{textAlign:"right",fontSize:13,color:"#94A3B8"}}>{fmt(d.firstVal)}</span>
+                          <span style={{textAlign:"right",fontSize:14,fontWeight:700,color:"#0F172A"}}>{fmt(d.lastVal)}</span>
+                          <div style={{textAlign:"right"}}>
+                            <div>
+                              <span style={{fontSize:13,fontWeight:700,color:dColor}}>{d.delta>0?"+":""}{d.delta}</span>
+                              {d.pct!==null&&<span style={{fontSize:10,color:dColor,opacity:0.65,marginLeft:4}}>({d.pct>0?"+":""}{d.pct.toFixed(0)}%)</span>}
+                              {d.isNewEntry&&<span style={{fontSize:10,background:"#ECFDF5",color:"#10B981",borderRadius:4,padding:"1px 5px",marginLeft:4,fontWeight:600}}>NEW</span>}
+                            </div>
+                            {Math.abs(d.avgMonthly)>0.1&&(
+                              <span className="avg-chip" style={{background:avgColor+"18",color:avgColor}}>
+                                avg {d.avgMonthly>0?"+":""}{d.avgMonthly.toFixed(1)}/mo
+                              </span>
+                            )}
+                          </div>
+                          <div style={{display:"flex",justifyContent:"flex-end"}}><Sparkline data={d.history} color={dot}/></div>
+                        </div>
+                      );
+                    })}
+
+                    {/* No activity section */}
+                    {inactive.length>0&&(
+                      <>
+                        <div onClick={()=>setNoActivityOpen(o=>!o)}
+                          style={{display:"flex",alignItems:"center",gap:10,padding:"10px 20px",background:"#F8FAFC",borderTop:"1px solid #F1F5F9",cursor:"pointer",userSelect:"none"}}>
+                          <span style={{fontSize:10,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em"}}>
+                            No activity yet — {inactive.length} partner{inactive.length>1?"s":""}
+                          </span>
+                          <span style={{fontSize:11,color:"#CBD5E1",marginLeft:"auto"}}>{noActivityOpen?"▲":"▼"}</span>
+                        </div>
+                        {noActivityOpen&&inactive.map(d=>(
+                          <div key={d.label} className="trow" onClick={()=>setActiveDoctor(d)}
+                            style={{display:"grid",gridTemplateColumns:"1fr 76px 76px 160px 72px",padding:"12px 20px",alignItems:"center",opacity:0.5}}>
+                            <div style={{display:"flex",alignItems:"center",gap:10}}>
+                              <div style={{width:7,height:7,borderRadius:"50%",background:"#E2E8F0",flexShrink:0}}/>
+                              <div style={{fontSize:13,fontWeight:500,color:"#94A3B8"}}>{d.label}</div>
+                            </div>
+                            <span style={{textAlign:"right",fontSize:13,color:"#CBD5E1"}}>—</span>
+                            <span style={{textAlign:"right",fontSize:13,color:"#CBD5E1"}}>—</span>
+                            <span style={{textAlign:"right",fontSize:13,color:"#CBD5E1"}}>—</span>
+                            <span/>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </div>
         )}
 
         {/* ── OVERVIEW TAB ── */}
         {activeTab==="overview"&&(
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-            <div style={{gridColumn:"1/-1"}}>{periodSlider}</div>
-            <div className="card" style={{padding:"20px 24px",gridColumn:"1/-1"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
-                <div>
-                  <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>
-                    Total Portfolio MUSP {overviewTreat&&<span style={{color:T_COLORS[overviewTreat]||"#3B82F6"}}>— {overviewTreat}</span>}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 320px",gap:16,alignItems:"start"}}>
+
+            {/* LEFT — chart + period slider */}
+            <div style={{display:"flex",flexDirection:"column",gap:16}}>
+              <div style={{gridColumn:"1/-1"}}>{periodSlider}</div>
+
+              {/* Global chart card */}
+              <div className="card" style={{padding:"20px 24px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:4}}>
+                      Total Portfolio MUSP {overviewTreat&&<span style={{color:T_COLORS[overviewTreat]||"#3B82F6"}}>— {overviewTreat}</span>}
+                    </div>
+                    <div style={{fontSize:32,fontWeight:700,color:"#0F172A",letterSpacing:"-0.02em"}}>{fmt(filteredTotals.totalMUSP)}</div>
                   </div>
-                  <div style={{fontSize:28,fontWeight:700,color:"#0F172A"}}>{fmt(filteredTotals.totalMUSP)}</div>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:11,color:"#94A3B8",marginBottom:2}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
-                  <div style={{fontSize:20,fontWeight:700,color:filteredTotals.totalDelta>=0?"#10B981":"#EF4444"}}>
-                    {filteredTotals.totalDelta>=0?"+":""}{fmt(filteredTotals.totalDelta)} ({filteredTotals.totalPct!==null?`${filteredTotals.totalPct>=0?"+":""}${filteredTotals.totalPct.toFixed(1)}%`:"—"})
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:11,color:"#94A3B8",marginBottom:4}}>{fmtMonth(months[dateRange[0]])} → {fmtMonth(months[Math.min(dateRange[1],months.length-1)])}</div>
+                    <div style={{fontSize:22,fontWeight:700,color:filteredTotals.totalDelta>=0?"#10B981":"#EF4444"}}>
+                      {filteredTotals.totalDelta>=0?"+":""}{fmt(filteredTotals.totalDelta)}
+                    </div>
+                    <div style={{fontSize:13,color:filteredTotals.totalPct>=0?"#10B981":"#EF4444",fontWeight:600}}>
+                      {filteredTotals.totalPct!==null?`${filteredTotals.totalPct>=0?"+":""}${filteredTotals.totalPct.toFixed(1)}%`:"—"}
+                    </div>
                   </div>
                 </div>
+                <GlobalChart history={filteredGlobalHistory} color={overviewTreat?T_COLORS[overviewTreat]||"#3B82F6":undefined}/>
               </div>
-              <GlobalChart history={filteredGlobalHistory} color={overviewTreat?T_COLORS[overviewTreat]||"#3B82F6":undefined}/>
+
+              {/* Doctors — 3 groups */}
+              <div className="card" style={{padding:"20px 24px"}}>
+                <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>
+                  Doctors — period change
+                </div>
+                {(()=>{
+                  const sorted=[...filteredStats].sort((a,b)=>b.delta-a.delta);
+                  const growing=sorted.filter(d=>d.delta>0||d.isNewEntry);
+                  const declining=sorted.filter(d=>d.delta<0);
+                  const inactive=sorted.filter(d=>d.firstVal===0&&d.lastVal===0);
+                  const maxAbs=Math.max(...sorted.filter(d=>d.firstVal>0||d.lastVal>0).map(s=>Math.abs(s.delta)),1);
+
+                  const renderGroup=(list,color,label,icon)=>{
+                    if(list.length===0)return null;
+                    return(
+                      <div style={{marginBottom:20}}>
+                        <div style={{fontSize:10,fontWeight:700,color,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                          <span>{icon}</span>{label} ({list.length})
+                        </div>
+                        {list.map(d=>(
+                          <div key={d.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:"1px solid #F8FAFC",cursor:"pointer"}}
+                            onClick={()=>setActiveDoctor(d)}>
+                            <span style={{fontSize:12,color:"#334155",width:200,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</span>
+                            <div style={{flex:1,height:5,background:"#F1F5F9",borderRadius:3,overflow:"hidden"}}>
+                              <div style={{width:`${(Math.abs(d.delta)/maxAbs)*100}%`,height:"100%",background:color,borderRadius:3}}/>
+                            </div>
+                            <span style={{fontSize:12,fontWeight:700,color,width:52,textAlign:"right"}}>{d.delta>0?"+":""}{d.delta}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  };
+
+                  return(
+                    <>
+                      {renderGroup(growing,"#10B981","Growing","↑")}
+                      {renderGroup(declining,"#EF4444","Declining","↓")}
+                      {inactive.length>0&&(
+                        <div>
+                          <div style={{fontSize:10,fontWeight:700,color:"#CBD5E1",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
+                            No activity yet ({inactive.length})
+                          </div>
+                          {inactive.map(d=>(
+                            <div key={d.label} style={{display:"flex",alignItems:"center",gap:10,padding:"4px 0",opacity:0.5}}>
+                              <span style={{fontSize:12,color:"#94A3B8",width:200,flexShrink:0}}>{d.label}</span>
+                              <div style={{flex:1,height:4,background:"#F1F5F9",borderRadius:3}}/>
+                              <span style={{fontSize:12,color:"#CBD5E1",width:52,textAlign:"right"}}>—</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
             </div>
-            <div className="card" style={{padding:"20px 24px"}}>
+
+            {/* RIGHT — treatment breakdown */}
+            <div className="card" style={{padding:"20px 24px",position:"sticky",top:16}}>
               <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 Treatment breakdown
                 {overviewTreat&&<span onClick={()=>setOverviewTreat(null)} style={{cursor:"pointer",color:"#3B82F6",fontSize:10,fontWeight:700}}>✕ Clear</span>}
@@ -968,43 +1088,24 @@ export default function Dashboard(){
               {treatSummary.map(({t,v,pct})=>{
                 const isActive=overviewTreat===t;
                 return(
-                  <div key={t} style={{marginBottom:14,cursor:"pointer",opacity:overviewTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
+                  <div key={t} style={{marginBottom:16,cursor:"pointer",opacity:overviewTreat&&!isActive?0.4:1,transition:"opacity 0.15s"}}
                     onClick={()=>setOverviewTreat(prev=>prev===t?null:t)}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
-                      <span style={{fontSize:12,fontWeight:600,color:T_COLORS[t]||"#94A3B8",display:"flex",alignItems:"center",gap:6}}>
-                        {isActive&&<span style={{fontSize:9,background:T_COLORS[t]||"#3B82F6",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>●</span>}
+                      <span style={{fontSize:13,fontWeight:600,color:isActive?T_COLORS[t]||"#3B82F6":"#334155",display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{width:8,height:8,borderRadius:"50%",background:T_COLORS[t]||"#94A3B8",display:"inline-block",flexShrink:0}}/>
                         {t}
                       </span>
-                      <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400}}>({(pct*100).toFixed(0)}%)</span></span>
+                      <span style={{fontSize:12,color:"#64748B",fontWeight:600}}>{v.toLocaleString()} <span style={{color:"#CBD5E1",fontWeight:400,fontSize:11}}>({(pct*100).toFixed(0)}%)</span></span>
                     </div>
-                    <div style={{height:8,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
+                    <div style={{height:6,background:"#F1F5F9",borderRadius:4,overflow:"hidden"}}>
                       <div style={{width:`${pct*100}%`,height:"100%",background:T_COLORS[t]||"#3B82F6",borderRadius:4,
-                        boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:""}}/>
+                        boxShadow:isActive?`0 0 6px ${T_COLORS[t]||"#3B82F6"}88`:"",transition:"box-shadow 0.2s"}}/>
                     </div>
                   </div>
                 );
               })}
             </div>
-            <div className="card" style={{padding:"20px 24px"}}>
-              <div style={{fontSize:11,fontWeight:600,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:16}}>All doctors — period change</div>
-              <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                {[...filteredStats].sort((a,b)=>b.delta-a.delta).map(d=>{
-                  const isUp=d.delta>0,isDown=d.delta<0;
-                  const color=isUp?"#10B981":isDown?"#EF4444":"#94A3B8";
-                  const maxAbs=Math.max(...filteredStats.map(s=>Math.abs(s.delta)),1);
-                  return(
-                    <div key={d.label} style={{display:"flex",alignItems:"center",gap:10,padding:"5px 0",borderBottom:"1px solid #F8FAFC",cursor:"pointer"}}
-                      onClick={()=>{setActiveDoctor(d);}}>
-                      <span style={{fontSize:11,color:"#334155",width:190,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</span>
-                      <div style={{flex:1,height:6,background:"#F1F5F9",borderRadius:3,overflow:"hidden"}}>
-                        <div style={{width:`${(Math.abs(d.delta)/maxAbs)*100}%`,height:"100%",background:color,borderRadius:3}}/>
-                      </div>
-                      <span style={{fontSize:11,fontWeight:700,color,width:50,textAlign:"right"}}>{d.delta>0?"+":""}{d.delta}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+
           </div>
         )}
       </div>
